@@ -1,0 +1,51 @@
+# AdGuard Home 设备身份中枢 (adh-device-hub)
+#
+# 注意：使用前必须先在项目目录执行 `npm install`（依赖是平台相关的：
+#   尤其是 better-sqlite3 这类原生模块，不能在别的系统上装好再拷过来）。
+#   ARM64 平台若编译失败：apt install -y python3 make g++
+#
+# 安装：
+#   sudo cp deploy/adh-device-hub.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now adh-device-hub
+# 查看：
+#   systemctl status adh-device-hub
+#   journalctl -u adh-device-hub -f
+
+[Unit]
+Description=AdGuard Home 设备身份中枢 (adh-device-hub)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# ↓↓↓ 按你的实际情况改这 2 项 ↓↓↓
+User=root
+WorkingDirectory=/opt/adh-device-hub
+# 注意：node 的绝对路径用 `which node` 确认（可能是 /usr/bin/node 或 /usr/local/bin/node）
+#       若路径不对，systemd 会报 status=203/EXEC
+ExecStart=/usr/bin/node src/server.js
+
+Environment=NODE_ENV=production
+Environment=PORT=7788
+Environment=HOST=0.0.0.0
+Environment=TZ=Asia/Shanghai
+# 不设置 DATA_DIR 时，数据默认存在 <项目目录>/data（推荐，省得与项目分离）
+# 如需指定其它位置，取消下面这行注释并按需修改：
+# Environment=DATA_DIR=/opt/adh-device-hub/data
+
+# 退出后自动拉起；开机自启由 [Install] 段负责
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=adh-device-hub
+
+# 基础安全加固
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

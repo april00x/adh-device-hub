@@ -1,0 +1,1573 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>设备身份中枢 · AdGuard Home</title>
+<meta name="description" content="以 MAC 为锚点归并设备 IP，把 AdGuard Home 的查询日志按设备合并后长期查看">
+<meta name="theme-color" content="#0f1216">
+<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%236b8fc7'/%3E%3Cg fill='none' stroke='%2310151b' stroke-width='1.7' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='2.5'/%3E%3Ccircle cx='5' cy='5.5' r='1.6'/%3E%3Ccircle cx='19' cy='5.5' r='1.6'/%3E%3Ccircle cx='12' cy='19.5' r='1.6'/%3E%3Cpath d='M6.4 6.9l3.8 3.2M17.6 6.9l-3.8 3.2M12 14.5v3.4'/%3E%3C/g%3E%3C/svg%3E">
+</head>
+<body>
+<div id="app" v-cloak>
+
+  <!-- ============ 登录 / 初始化 ============ -->
+  <div v-if="!me" class="login-wrap">
+    <div class="login-card">
+      <div class="login-logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="2.5"/><circle cx="5" cy="5.5" r="1.6"/><circle cx="19" cy="5.5" r="1.6"/><circle cx="12" cy="19.5" r="1.6"/><path d="M6.4 6.9l3.8 3.2M17.6 6.9l-3.8 3.2M12 14.5v3.4"/></svg></div>
+      <h1 v-if="!setupDone">初始化管理员</h1>
+      <h1 v-else>设备身份中枢</h1>
+      <div class="sub" v-if="!setupDone">首次使用，请创建管理员账号（仅保存在本机）</div>
+      <div class="sub" v-else>以 MAC 为锚点归并设备 IP，只读汇总 AdGuard 的过滤日志</div>
+
+      <label class="field">
+        <span>用户名</span>
+        <input class="input" v-model.trim="authForm.username" @keyup.enter="submitAuth" placeholder="admin" autocomplete="username">
+      </label>
+      <label class="field">
+        <span>密码</span>
+        <input class="input" type="password" v-model="authForm.password" @keyup.enter="submitAuth" :placeholder="setupDone ? '请输入密码' : '至少 6 位'" autocomplete="current-password">
+      </label>
+      <div v-if="setupDone" class="hint" style="margin-bottom:12px">
+        账号由初始化时创建；忘记密码可在部署机上执行 <span class="mono">npm run reset-password &lt;新密码&gt;</span>
+      </div>
+      <button class="btn btn-primary" style="width:100%;padding:10px" :disabled="busy" @click="submitAuth">
+        <span v-if="busy" class="spin"></span>{{ setupDone ? '登 录' : '创建并进入' }}
+      </button>
+      <div v-if="authError" class="hint" style="color:var(--danger);margin-top:12px">{{ authError }}</div>
+    </div>
+  </div>
+
+  <!-- ============ 主界面 ============ -->
+  <div v-else class="layout">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="dot"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="2.5"/><circle cx="5" cy="5.5" r="1.6"/><circle cx="19" cy="5.5" r="1.6"/><circle cx="12" cy="19.5" r="1.6"/><path d="M6.4 6.9l3.8 3.2M17.6 6.9l-3.8 3.2M12 14.5v3.4"/></svg></div>
+        <div>
+          <div class="name">设备身份中枢</div>
+          <div class="tag">AdGuard Home</div>
+        </div>
+      </div>
+      <div class="nav-item" :class="{active: view==='dashboard'}" @click="go('dashboard')"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="7" rx="2"/><rect x="3.5" y="13.5" width="7" height="7" rx="2"/><rect x="13.5" y="13.5" width="7" height="7" rx="2"/></svg></span>概览</div>
+      <div class="nav-item" :class="{active: view==='devices'||view==='device'}" @click="go('devices')"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><rect x="2.5" y="4" width="19" height="12.5" rx="2"/><path d="M9 20.5h6M12 16.5v4"/></svg></span>设备台账<span class="spacer"></span><span class="badge" v-if="devices.length">{{ devices.length }}</span></div>
+      <div class="nav-item" :class="{active: view==='logs'}" @click="go('logs')"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 6.5h16M4 12h16M4 17.5h9"/></svg></span>合并日志</div>
+      <div class="nav-item" :class="{active: view==='sink'}" @click="go('sink')"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 5h17l-6.4 7.8v6.3l-4.2-2.2v-4.1z"/></svg></span>拦截流量分析<span class="spacer"></span><span class="badge" :class="sinkStatus.running ? 'accent' : ''" v-if="sinkStatus.hits">{{ fmtNum(sinkStatus.hits) }}</span></div>
+      <div class="nav-item" :class="{active: view==='agh'}" @click="go('agh')"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><rect x="2.5" y="5" width="19" height="14" rx="2.5"/><circle cx="8.5" cy="10.8" r="1.9"/><path d="M5.4 16.2c.7-1.3 1.8-2 3.1-2s2.4.7 3.1 2M14.6 10.5h4M14.6 14h3"/></svg></span>AdGuard 客户端<span class="spacer"></span><span class="badge" v-if="agh.clients.length">{{ agh.clients.length }}</span></div>
+      <div class="nav-item" :class="{active: view==='settings'}" @click="go('settings')"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 7.5h8.8M17.6 7.5H20M4 16.5h2.6M11.4 16.5H20"/><circle cx="15" cy="7.5" r="2.2"/><circle cx="9" cy="16.5" r="2.2"/></svg></span>设置</div>
+      <div class="foot">
+        <div class="badge accent" style="margin-bottom:8px" v-if="!agh.write_allowed">只读模式</div>
+        <div class="badge warn" style="margin-bottom:8px" v-else>写回已开启</div>
+        <div class="muted" style="font-size:11px;line-height:1.5;margin-bottom:8px" v-if="!agh.write_allowed">只拉取数据与展示，不修改路由器与 AdGuard 任何配置</div>
+        <div class="muted" style="font-size:11px;line-height:1.5;margin-bottom:8px" v-else>日志与设备仍为只读；仅「AdGuard 客户端」页在你手动确认后可写回 AdGuard{{ agh.auto_sync ? '，且已开启自动定时同步' : '' }}</div>
+        <div>{{ me.username }}</div>
+        <div style="margin-top:6px"><a href="#" @click.prevent="logout">退出登录</a></div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div v-if="connWarning" class="card" style="background:var(--danger-soft);border-color:transparent;margin-bottom:14px;padding:10px 14px">
+        <div class="row wrap" style="gap:8px;font-size:13px">
+          <span style="color:var(--danger);font-weight:600">需要注意</span>
+          <span>{{ connWarning }}</span>
+          <span class="spacer"></span>
+          <button class="btn btn-sm" @click="go('settings')">去设置</button>
+        </div>
+      </div>
+
+      <!-- ---------- 概览 ---------- -->
+      <template v-if="view==='dashboard'">
+        <div class="page-head">
+          <h2>概览</h2>
+          <span class="desc">查询日志按设备归并后的统计</span>
+          <span class="spacer"></span>
+          <div class="tabs" style="border:0;margin:0">
+            <div class="tab" v-for="r in ranges" :key="r.k" :class="{active: range===r.k}" @click="setRange(r.k)">{{ r.label }}</div>
+          </div>
+        </div>
+
+        <div class="grid cols-4">
+          <div class="stat"><div class="label">查询总数</div><div class="value">{{ fmtNum(ov.total) }}</div><div class="extra">{{ rangeLabel }} · 未归属 {{ fmtNum(ov.unmapped) }} · 本机 {{ fmtNum(ov.local) }}</div></div>
+          <div class="stat"><div class="label">拦截次数</div><div class="value" style="color:var(--danger)">{{ fmtNum(ov.blocked) }}</div><div class="extra">拦截率 {{ ov.blocked_rate }}%</div></div>
+          <div class="stat"><div class="label">活跃设备</div><div class="value">{{ ov.active24 }}</div><div class="extra">共 {{ ov.devices }} 台 · 已命名 {{ ov.named }}</div></div>
+          <div class="stat">
+            <div class="label">已匹配 AdGuard 客户端</div>
+            <div class="value">{{ ov.matched }}</div>
+            <div class="extra">{{ ov.matched ? '已从 AdGuard 继承名称' : '尚未匹配：点设备台账的「读取 AdGuard 客户端并匹配名称」' }}</div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:14px">
+          <div class="card-title">查询 / 拦截趋势
+            <span class="muted" style="font-size:12px">上游数据最近摄取：{{ ov.last_ingest ? fmtTime(ov.last_ingest) : '尚未摄取' }}</span>
+          </div>
+          <div ref="trend" style="height:260px"></div>
+        </div>
+
+        <div class="card" style="margin-top:14px">
+          <div class="card-title">拦截 Top 设备
+            <span class="muted" style="font-size:12px">{{ rangeLabel }}内被拦截次数最多的设备 · 条形以榜首为满格 · 点击可查看详情</span>
+          </div>
+          <div class="table-wrap" v-if="topBlockedDevices.length">
+            <table class="tbl">
+              <thead><tr><th style="width:44px">#</th><th style="width:220px">设备</th><th style="width:100px">拦截次数</th><th>占全部拦截</th><th style="width:90px">拦截率</th></tr></thead>
+              <tbody>
+                <tr v-for="(d, i) in topBlockedDevices" :key="d.device_id" class="clickable" @click="openDevice(d.device_id)">
+                  <td class="muted">{{ i + 1 }}</td>
+                  <td class="ellipsis" :title="d.device_name">{{ d.device_name }}</td>
+                  <td style="color:var(--danger);font-weight:600">{{ fmtNum(d.blocked) }}</td>
+                  <td>
+                    <div class="row" style="gap:8px;align-items:center">
+                      <div class="bar blocked" style="flex:1"><i :style="{ width: blockedBar(d) }"></i></div>
+                      <span class="muted mono" style="font-size:11.5px;width:46px;text-align:right">{{ blockedShare(d) }}%</span>
+                    </div>
+                  </td>
+                  <td>{{ d.total ? (d.blocked/d.total*100).toFixed(1) : 0 }}%</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div v-else class="empty"><div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="2.5"/><circle cx="5" cy="5.5" r="1.6"/><circle cx="19" cy="5.5" r="1.6"/><circle cx="12" cy="19.5" r="1.6"/><path d="M6.4 6.9l3.8 3.2M17.6 6.9l-3.8 3.2M12 14.5v3.4"/></svg></div>暂无拦截记录</div>
+        </div>
+
+        <div class="grid cols-2" style="margin-top:14px">
+          <div class="card">
+            <div class="card-title">流量 Top 设备</div>
+            <div class="table-wrap" v-if="ov.topDevices && ov.topDevices.length">
+              <table class="tbl">
+                <thead><tr><th>设备</th><th style="width:90px">查询</th><th style="width:90px">拦截</th><th style="width:110px">拦截率</th></tr></thead>
+                <tbody>
+                  <tr v-for="d in ov.topDevices" :key="d.device_id" class="clickable" @click="openDevice(d.device_id)">
+                    <td class="ellipsis">{{ d.device_name }}</td>
+                    <td>{{ fmtNum(d.total) }}</td>
+                    <td style="color:var(--danger)">{{ fmtNum(d.blocked) }}</td>
+                    <td>{{ d.total ? (d.blocked/d.total*100).toFixed(1) : 0 }}%</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div v-else class="empty"><div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="2.5"/><circle cx="5" cy="5.5" r="1.6"/><circle cx="19" cy="5.5" r="1.6"/><circle cx="12" cy="19.5" r="1.6"/><path d="M6.4 6.9l3.8 3.2M17.6 6.9l-3.8 3.2M12 14.5v3.4"/></svg></div>暂无数据，请先「采集」并在设置里点「摄取日志」</div>
+          </div>
+          <div class="card">
+            <div class="card-title">拦截 Top 域名
+              <div class="switch" :class="{on: rootDomains}" @click="setRootDomains(!rootDomains)" title="把 a.x.com 与 b.x.com 合并为 x.com 统计">
+                <span class="track"></span>按主域名聚合
+              </div>
+            </div>
+            <div class="table-wrap" v-if="ov.topBlocked && ov.topBlocked.length">
+              <table class="tbl">
+                <thead><tr><th>域名</th><th style="width:80px">次数</th></tr></thead>
+                <tbody><tr v-for="d in ov.topBlocked" :key="d.domain"><td class="mono ellipsis">{{ d.domain }}</td><td style="color:var(--danger)">{{ fmtNum(d.c) }}</td></tr></tbody>
+              </table>
+            </div>
+            <div v-else class="empty"><div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="2.5"/><circle cx="5" cy="5.5" r="1.6"/><circle cx="19" cy="5.5" r="1.6"/><circle cx="12" cy="19.5" r="1.6"/><path d="M6.4 6.9l3.8 3.2M17.6 6.9l-3.8 3.2M12 14.5v3.4"/></svg></div>暂无拦截记录</div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:14px" v-if="anomalies.length">
+          <div class="card-title">值得注意的设备
+            <span class="muted" style="font-size:12px">高流量但零拦截 / 查询频率异常，点击可查看详情</span>
+          </div>
+          <div class="table-wrap">
+            <table class="tbl">
+              <thead><tr><th>设备</th><th style="width:90px">查询</th><th style="width:90px">拦截</th><th style="width:80px">拦截率</th><th style="width:100px">频率</th><th>提示</th></tr></thead>
+              <tbody>
+                <tr v-for="a in anomalies" :key="a.device_id" class="clickable" @click="openDevice(a.device_id)">
+                  <td class="ellipsis">{{ a.device_name }}</td>
+                  <td>{{ fmtNum(a.total) }}</td>
+                  <td>{{ fmtNum(a.blocked) }}</td>
+                  <td>{{ a.blocked_rate }}%</td>
+                  <td class="muted">{{ a.per_minute }} / 分</td>
+                  <td><span class="badge warn" v-for="f in a.flags" :key="f" style="margin-right:4px">{{ f }}</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:14px">
+          <div class="card-title">最近任务</div>
+          <div class="table-wrap">
+            <table class="tbl">
+              <thead><tr><th style="width:110px">任务</th><th style="width:90px">状态</th><th>说明</th><th style="width:160px">时间</th></tr></thead>
+              <tbody>
+                <tr v-for="j in jobs" :key="j.id">
+                  <td>{{ j.job }}</td>
+                  <td><span class="badge" :class="j.status==='success'?'ok':(j.status==='failed'?'danger':'warn')">{{ j.status }}</span></td>
+                  <td class="ellipsis dim">{{ j.message }}</td>
+                  <td class="muted">{{ fmtTime(j.finished_at) }}</td>
+                </tr>
+                <tr v-if="!jobs.length"><td colspan="4" class="muted" style="text-align:center;padding:20px">暂无任务记录</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </template>
+
+      <!-- ---------- 设备台账 ---------- -->
+      <template v-if="view==='devices'">
+        <div class="page-head">
+          <h2>设备台账</h2>
+          <span class="desc">同一设备的多个/历史 IP 已按 MAC 归并（本系统只读，不写回 AdGuard）</span>
+          <span class="spacer"></span>
+          <button class="btn btn-primary" :disabled="busy" @click="doCollect"><span v-if="busyCollect" class="spin"></span>采集设备</button>
+        </div>
+
+        <div class="card">
+          <div class="row wrap" style="margin-bottom:12px">
+            <input class="input" style="max-width:220px" v-model.trim="deviceQuery" placeholder="搜索 名称 / MAC / IP / 主机名 / 厂商 / 备注">
+            <div class="tabs" style="border:0;margin:0">
+              <div class="tab" v-for="f in deviceFilters" :key="f.k" :class="{active: deviceFilter===f.k}" @click="deviceFilter=f.k">{{ f.label }}</div>
+            </div>
+            <select class="input" style="max-width:140px" v-model="deviceCategory">
+              <option value="">全部分类</option>
+              <option value="__none__">未分类</option>
+              <option v-for="c in categoryOptions" :key="c" :value="c">{{ categoryLabel(c) }}</option>
+            </select>
+            <select class="input" style="max-width:140px" v-model="deviceTag" v-if="tagOptions.length">
+              <option value="">全部标签</option>
+              <option v-for="t in tagOptions" :key="t" :value="t">{{ t }}</option>
+            </select>
+            <span class="spacer"></span>
+            <button class="btn btn-sm" @click="importAgh">读取 AdGuard 客户端并匹配名称</button>
+            <a class="btn btn-sm" href="/api/export/devices.csv" target="_blank">导出 CSV</a>
+          </div>
+
+          <div v-if="selected.length" class="card" style="background:var(--accent-soft);border-color:transparent;margin-bottom:12px;padding:10px 14px">
+            <div class="row wrap" style="gap:8px;font-size:13px">
+              <b>已选 {{ selected.length }} 台</b>
+              <select class="input" style="max-width:130px" v-model="bulkCategory">
+                <option value="">设分类…</option>
+                <option v-for="c in categories" :key="c.k" :value="c.k">{{ c.label }}</option>
+              </select>
+              <button class="btn btn-sm" :disabled="!bulkCategory" @click="applyBulk({ category: bulkCategory })">应用分类</button>
+              <input class="input" style="max-width:130px" v-model.trim="bulkTag" placeholder="加标签…">
+              <button class="btn btn-sm" :disabled="!bulkTag" @click="applyBulkTag">应用标签</button>
+              <button class="btn btn-sm" @click="applyBulk({ ignored: 1 })">忽略</button>
+              <button class="btn btn-sm" @click="applyBulk({ ignored: 0 })">取消忽略</button>
+              <button class="btn btn-sm btn-danger" @click="bulkDelete">删除</button>
+              <span class="spacer"></span>
+              <button class="btn btn-sm btn-ghost" @click="clearSelection">取消选择</button>
+            </div>
+          </div>
+
+          <div v-if="hints.length" class="card" style="background:var(--warn-soft);border-color:transparent;margin-bottom:12px;padding:10px 14px">
+            <div class="row wrap" style="font-size:12.5px">
+              <b style="color:var(--warn)">关联建议</b>
+              <span class="dim">检测到以下设备主机名相同但 MAC 不同（可能是同一台设备换了随机 MAC），可手动合并：</span>
+            </div>
+            <div v-for="(h,i) in hints" :key="i" class="row wrap" style="margin-top:8px;font-size:12.5px">
+              <span class="badge warn">{{ h.hostname }}</span>
+              <span v-for="d in h.devices" :key="d.id" class="chip">{{ d.name }} <span class="muted mono">{{ d.mac }}</span></span>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table class="tbl">
+              <thead>
+                <tr>
+                  <th style="width:34px"><input type="checkbox" :checked="allSelected" @change="toggleSelectAll" title="全选/取消全选"></th>
+                  <th style="min-width:190px">名称（点击可直接改）</th>
+                  <th style="width:150px">当前 IP</th>
+                  <th style="width:70px">IP数</th>
+                  <th style="width:190px">主 MAC</th>
+                  <th style="width:110px">厂商</th>
+                  <th style="width:120px">最后活动</th>
+                  <th style="width:150px">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="d in filteredDevices" :key="d.id" class="clickable" @click="openDevice(d.id)">
+                  <td @click.stop><input type="checkbox" :checked="selected.includes(d.id)" @change="toggleSelect(d.id)"></td>
+                  <td @click.stop="startEditName(d)" style="cursor:text" title="点击可直接改中文名">
+                    <div class="row">
+                      <input v-if="editingNameId === d.id" class="input" style="max-width:170px;padding:3px 8px"
+                             v-model="editingNameValue" v-focus @click.stop placeholder="输入中文名"
+                             @keyup.enter="saveName(d)" @keyup.esc="cancelEditName()" @blur="saveName(d)">
+                      <span v-else style="font-weight:500">{{ d.display_name }}</span>
+                      <span class="badge danger" v-if="d.ignored">已忽略</span>
+                      <span class="badge warn" v-if="d.random_mac" title="本地管理位为1，多为手机隐私MAC">随机MAC</span>
+                      <span class="badge accent" v-if="d.agh_synced_name" :title="'AdGuard 中已有同名客户端：' + d.agh_synced_name">AGH同名</span>
+                    </div>
+                    <div class="row wrap" style="gap:6px;margin-top:3px">
+                      <span class="muted mono" v-if="d.suggested_name && d.name">{{ d.suggested_name }}</span>
+                      <span class="badge" v-if="d.category">{{ categoryLabel(d.category) }}</span>
+                      <span class="badge" v-for="t in (d.tags || [])" :key="t">{{ t }}</span>
+                    </div>
+                  </td>
+                  <td class="mono">{{ d.current_ip || '—' }}</td>
+                  <td>
+                    <span :class="d.ip_count>1?'badge accent':'muted'">{{ d.ip_count }}</span>
+                  </td>
+                  <td class="mono muted">{{ d.mac || '—' }}</td>
+                  <td class="dim">{{ d.vendor || '—' }}</td>
+                  <td class="muted">{{ relTime(d.last_seen) }}</td>
+                  <td @click.stop>
+                    <button class="btn btn-sm" @click="editDevice(d)">编辑</button>
+                    <button class="btn btn-sm btn-ghost" @click="openMerge(d)">合并</button>
+                  </td>
+                </tr>
+                <tr v-if="!filteredDevices.length"><td colspan="8"><div class="empty"><div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="2.5"/><circle cx="5" cy="5.5" r="1.6"/><circle cx="19" cy="5.5" r="1.6"/><circle cx="12" cy="19.5" r="1.6"/><path d="M6.4 6.9l3.8 3.2M17.6 6.9l-3.8 3.2M12 14.5v3.4"/></svg></div>没有匹配的设备<br><span class="hint">先点右上角「采集设备」，从路由器租约与邻居表自动发现设备</span></div></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </template>
+
+      <!-- ---------- 设备详情 ---------- -->
+      <template v-if="view==='device' && detail">
+        <div class="page-head">
+          <button class="btn btn-sm btn-ghost" @click="go('devices')">← 返回</button>
+          <h2>{{ detail.display_name }}</h2>
+          <span class="badge accent" v-if="detail.name">已命名</span>
+          <span class="badge" v-if="detail.random_mac">随机MAC</span>
+          <span class="spacer"></span>
+          <button class="btn" @click="editDevice(detail)">编辑</button>
+        </div>
+
+        <div class="grid cols-4">
+          <div class="stat"><div class="label">24h 查询</div><div class="value">{{ fmtNum(detail.queries_24h) }}</div></div>
+          <div class="stat"><div class="label">24h 拦截</div><div class="value" style="color:var(--danger)">{{ fmtNum(detail.blocked_24h) }}</div></div>
+          <div class="stat"><div class="label">累计 IP 数</div><div class="value">{{ detail.ip_count }}</div><div class="extra">多个/历史 IP 已归并</div></div>
+          <div class="stat"><div class="label">首次发现</div><div class="value" style="font-size:16px">{{ fmtTime(detail.first_seen) }}</div></div>
+        </div>
+
+        <div class="grid cols-2" style="margin-top:14px">
+          <div class="card">
+            <div class="card-title">基本信息</div>
+            <div class="kv">
+              <div class="k">中文名</div><div>{{ detail.name || '（未命名）' }}</div>
+              <div class="k">建议名</div><div class="dim">{{ detail.suggested_name || '—' }}</div>
+              <div class="k">主 MAC</div><div class="mono">{{ detail.mac || '—' }}</div>
+              <div class="k">MAC 列表</div>
+              <div class="chip-list">
+                <span class="chip" v-for="m in detail.macs_detail" :key="m.mac">{{ m.mac }} <span class="muted">{{ m.source }}</span></span>
+                <span v-if="!detail.macs_detail.length" class="muted">—</span>
+              </div>
+              <div class="k">厂商</div><div>{{ detail.vendor || '未知厂商' }}</div>
+              <div class="k">分类</div><div>{{ categoryLabel(detail.category) }}</div>
+              <div class="k">备注</div><div>{{ detail.notes || '—' }}</div>
+              <div class="k">最后活动</div><div>{{ fmtTime(detail.last_seen) }}</div>
+              <div class="k">AdGuard</div>
+              <div>
+                <span class="badge accent" v-if="detail.agh_synced_name">已有同名客户端「{{ detail.agh_synced_name }}」</span>
+                <span class="muted" v-else>无同名客户端（本系统不写回 AdGuard）</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-title">IP 历史（{{ detail.ips.length }}）
+              <span class="muted" style="font-size:12px">同一设备换 IP 后仍归到本设备</span>
+            </div>
+            <div class="row" style="margin-bottom:10px">
+              <input class="input" v-model.trim="newIp" placeholder="手动添加 IP（如 192.168.1.88）" @keyup.enter="addIp">
+              <button class="btn" @click="addIp">添加</button>
+            </div>
+            <div class="table-wrap" style="max-height:280px;overflow:auto">
+              <table class="tbl">
+                <thead><tr><th>IP</th><th style="width:96px">状态</th><th style="width:104px">窗口内查询</th><th style="width:90px">来源</th><th style="width:110px">最后出现</th><th style="width:50px"></th></tr></thead>
+                <tbody>
+                  <tr v-for="ip in detail.ips" :key="ip.ip">
+                    <td class="mono">{{ ip.ip }}</td>
+                    <td>
+                      <span class="badge ok" v-if="ip.queries > 0"
+                            :title="'AdGuard 统计里还有 ' + ip.queries + ' 次查询；同步客户端时会把它写进识别地址（ids）'">会同步</span>
+                      <span class="badge accent" v-else-if="ip.recently_seen"
+                            :title="'设备当前还持有这个地址（邻居表/租约里最近有记录），但 AdGuard 统计里已经没有它的查询，写了也归属不到流量，同步时不写'">在用</span>
+                      <span class="badge" v-else :title="'AdGuard 那边早已不再统计这个地址，只是台账里保留的历史记录'">历史</span>
+                    </td>
+                    <td class="muted">{{ ip.queries ? ip.queries : '—' }}</td>
+                    <td class="muted">{{ ip.source || '—' }}</td>
+                    <td class="muted">{{ relTime(ip.last_seen) }}</td>
+                    <td><span class="x" style="cursor:pointer;color:var(--muted)" @click="removeIp(ip)" title="删除该 IP 记录">✕</span></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="hint" style="margin-top:10px">
+              「窗口内查询」= AdGuard 保留统计的这段时间（当前 <b>{{ fmtWindow(detail.stats_window_sec) }}</b>，可在 AdGuard 的「查询日志设置」里改；本系统自动跟随）里该地址的查询数。
+              同步 AdGuard 客户端时的规则就按它来：<span class="badge ok">会同步</span> 窗口内 AdGuard 还在统计它 → 写进 ids；
+              <span class="badge accent">在用</span> 设备还持有它、但 AdGuard 已经不统计 → 不写；
+              <span class="badge">历史</span> 两边都不再出现 → 会从 ids 里删掉。
+              IPv6 隐私地址轮换很快，本页保留全部历史只是为了让你看到完整轨迹。
+            </div>
+          </div>
+        </div>
+
+        <div class="grid cols-2" style="margin-top:14px">
+          <div class="card">
+            <div class="card-title">该设备查询 Top 域名</div>
+            <div class="table-wrap" style="max-height:320px;overflow:auto" v-if="deviceTops.allowed.length">
+              <table class="tbl">
+                <thead><tr><th>域名</th><th style="width:80px">次数</th></tr></thead>
+                <tbody><tr v-for="t in deviceTops.allowed" :key="t.domain"><td class="mono ellipsis">{{ t.domain }}</td><td>{{ fmtNum(t.c) }}</td></tr></tbody>
+              </table>
+            </div>
+            <div v-else class="empty">暂无数据</div>
+          </div>
+          <div class="card">
+            <div class="card-title">该设备被拦截 Top 域名</div>
+            <div class="table-wrap" style="max-height:320px;overflow:auto" v-if="deviceTops.blocked.length">
+              <table class="tbl">
+                <thead><tr><th>域名</th><th style="width:80px">次数</th></tr></thead>
+                <tbody><tr v-for="t in deviceTops.blocked" :key="t.domain"><td class="mono ellipsis">{{ t.domain }}</td><td style="color:var(--danger)">{{ fmtNum(t.c) }}</td></tr></tbody>
+              </table>
+            </div>
+            <div v-else class="empty">暂无拦截记录</div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:14px">
+          <div class="card-title">最近 50 条查询记录
+            <button class="btn btn-sm btn-ghost" @click="viewLogsForDevice(detail.id)">查看全部 →</button>
+          </div>
+          <div class="table-wrap" style="max-height:420px;overflow:auto">
+            <table class="tbl">
+              <thead><tr><th style="width:150px">时间</th><th>域名</th><th style="width:70px">类型</th><th style="width:110px">来源IP</th><th style="width:90px">结果</th></tr></thead>
+              <tbody>
+                <tr v-for="l in detail.recent_logs" :key="l.id">
+                  <td class="muted">{{ fmtTime(l.ts) }}</td>
+                  <td class="mono ellipsis">{{ l.domain }}</td>
+                  <td class="muted">{{ l.qtype }}</td>
+                  <td class="mono muted">{{ l.client_ip }}</td>
+                  <td><span class="badge danger" v-if="l.blocked">拦截</span><span class="badge ok" v-else>放行</span></td>
+                </tr>
+                <tr v-if="!detail.recent_logs.length"><td colspan="5"><div class="empty">暂无可显示的本地归档日志，请到「设置」点「摄取日志」</div></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </template>
+
+      <!-- ---------- 合并日志 ---------- -->
+      <template v-if="view==='logs'">
+        <div class="page-head">
+          <h2>合并日志</h2>
+          <span class="desc">把同一设备在不同 IP 上的查询记录合并查看</span>
+          <span class="spacer"></span>
+          <button class="btn" :disabled="busy" @click="doIngest">摄取最新日志</button>
+        </div>
+
+        <div class="card">
+          <div class="row wrap" style="margin-bottom:12px">
+            <select class="input" style="max-width:200px" v-model="logFilter.deviceId" @change="loadLogs(1)">
+              <option value="">全部</option>
+              <option v-for="d in devices" :key="d.id" :value="String(d.id)">{{ d.display_name }}</option>
+              <option value="local">路由器本机</option>
+              <option value="__none__">未归属（非本机）</option>
+            </select>
+            <select class="input" style="max-width:120px" v-model="logFilter.blocked" @change="loadLogs(1)">
+              <option value="">全部结果</option>
+              <option value="true">仅拦截</option>
+              <option value="false">仅放行</option>
+            </select>
+            <input class="input" style="max-width:190px" v-model.trim="logFilter.domain" placeholder="域名包含…" @keyup.enter="loadLogs(1)">
+            <input class="input" style="max-width:180px" v-model.trim="logFilter.clientIp" placeholder="客户端 IP 精确匹配…" @keyup.enter="loadLogs(1)">
+            <select class="input" style="max-width:120px" v-model="logFilter.range" @change="loadLogs(1)">
+              <option value="1h">近 1 小时</option>
+              <option value="24h">近 24 小时</option>
+              <option value="7d">近 7 天</option>
+              <option value="30d">近 30 天</option>
+            </select>
+            <button class="btn" @click="loadLogs(1)">查询</button>
+            <span class="spacer"></span>
+            <a class="btn" :href="logsExportUrl" target="_blank" title="按当前筛选导出（最多 5 万行）">导出 CSV</a>
+          </div>
+
+          <div class="row wrap" style="gap:10px;margin-bottom:12px" v-if="ov.unmapped">
+            <span class="badge warn">有 {{ fmtNum(ov.unmapped) }} 条客户端日志未能归属到设备（不含路由器本机）</span>
+            <span class="muted" style="font-size:12px">点「采集设备」更新邻居表后会自动回溯；也可在下方「按 IP 指派」里直接绑定</span>
+            <span class="spacer"></span>
+            <button class="btn btn-sm btn-danger" @click="pruneUnmapped">清理这些未归属日志</button>
+          </div>
+
+          <div class="card" v-if="logFilter.deviceId==='__none__' && unmappedIps.length" style="background:var(--bg-soft);margin-bottom:12px;padding:12px">
+            <div class="card-title" style="margin-bottom:8px">按 IP 指派（{{ unmappedIps.length }} 个未归属 IP）</div>
+            <div class="table-wrap" style="max-height:260px;overflow:auto">
+              <table class="tbl">
+                <thead><tr><th style="width:168px">客户端 IP</th><th style="width:80px">条数</th><th style="width:160px">最近出现</th><th>样本域名</th><th style="width:110px"></th></tr></thead>
+                <tbody>
+                  <tr v-for="u in unmappedIps" :key="u.ip">
+                    <td class="mono wrap-cell">{{ u.ip }}</td>
+                    <td>{{ fmtNum(u.c) }}</td>
+                    <td class="muted">{{ fmtTime(u.last_ts) }}</td>
+                    <td class="mono muted ellipsis" :title="u.sample_domain">{{ u.sample_domain }}</td>
+                    <td><button class="btn btn-sm" @click="openAssign(u.ip)">指派给设备</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table class="tbl">
+              <thead><tr><th style="width:150px">时间</th><th style="width:160px">设备</th><th>域名</th><th style="width:66px">类型</th><th style="width:168px">来源IP</th><th style="width:90px">结果</th><th style="width:150px">命中规则</th></tr></thead>
+              <tbody>
+                <tr v-for="l in logs.rows" :key="l.id">
+                  <td class="muted">{{ fmtTime(l.ts) }}</td>
+                  <td class="ellipsis">{{ l.device_name || '—' }}</td>
+                  <td class="mono ellipsis" :title="l.domain">{{ l.domain }}</td>
+                  <td class="muted">{{ l.qtype }}</td>
+                  <td class="mono muted wrap-cell">{{ l.client_ip }}</td>
+                  <td><span class="badge danger" v-if="l.blocked">拦截</span><span class="badge ok" v-else>放行</span></td>
+                  <td class="mono muted ellipsis" :title="l.rule">{{ l.rule || l.reason || '—' }}</td>
+                </tr>
+                <tr v-if="!logs.rows.length"><td colspan="7"><div class="empty"><div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="2.5"/><circle cx="5" cy="5.5" r="1.6"/><circle cx="19" cy="5.5" r="1.6"/><circle cx="12" cy="19.5" r="1.6"/><path d="M6.4 6.9l3.8 3.2M17.6 6.9l-3.8 3.2M12 14.5v3.4"/></svg></div>暂无日志<br><span class="hint">先在「设置」里配置 AdGuard 连接，然后点「摄取最新日志」</span></div></td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="pager" v-if="logs.total">
+            <span>共 {{ fmtNum(logs.total) }} 条 · 第 {{ logs.page }} / {{ Math.max(1,Math.ceil(logs.total/logs.size)) }} 页</span>
+            <button class="btn btn-sm" :disabled="logs.page<=1" @click="loadLogs(logs.page-1)">上一页</button>
+            <button class="btn btn-sm" :disabled="logs.page*logs.size>=logs.total" @click="loadLogs(logs.page+1)">下一页</button>
+          </div>
+        </div>
+      </template>
+
+      <!-- ---------- AdGuard 客户端 ---------- -->
+      <template v-if="view==='agh'">
+        <div class="page-head">
+          <h2>AdGuard 客户端</h2>
+          <span class="desc">客户端的「识别地址 ids」决定 AdGuard 把哪些流量算到它头上；这里按设备的「主 MAC + 当前 IPv4 + AdGuard 仍在统计的 IPv6」维护它（不写历史 IP）</span>
+          <span class="spacer"></span>
+          <button class="btn btn-sm" @click="loadAgh">刷新</button>
+          <button class="btn btn-sm" :disabled="aghBusy || !aghSel.length" @click="openAghBatch(aghSel)">
+            同步选中<span v-if="aghSel.length">（{{ aghSel.length }}）</span>
+          </button>
+          <button class="btn btn-sm" :disabled="aghBusy || !agh.clients.length" @click="openAghBatch([])">全部同步</button>
+          <button class="btn btn-sm btn-primary" :disabled="!agh.write_allowed" @click="openAghCreate">新建客户端</button>
+        </div>
+
+        <div v-if="agh && agh.coverage_ok === false" class="card" style="background:var(--warn-soft);border-color:transparent;margin-bottom:14px;padding:12px 14px;font-size:12.5px">
+          <b style="color:var(--warn)">日志归档时间短于 AdGuard 的统计窗口</b>
+          <div style="margin-top:4px">
+            本系统只归档到 {{ fmtTime(agh.log_from) }} 的查询日志，而 AdGuard 的窗口是 {{ fmtWindow(agh.window_sec) }}。
+            这种情况下「窗口内查不到查询」并不能说明地址已经作废，因此同步会<b>只新增、不删除</b>任何 IPv6；
+            等归档覆盖满整个窗口后会自动恢复正常增删。
+          </div>
+        </div>
+
+        <div v-if="!agh.write_allowed" class="card" style="background:var(--warn-soft);border-color:transparent;margin-bottom:14px;padding:12px 14px">
+          <div class="row wrap" style="gap:8px;font-size:13px">
+            <b style="color:var(--warn)">写功能未开启</b>
+            <span>本系统默认只读。下面的列表可以查看，但新建 / 同步 / 删除需要先在设置里打开开关。</span>
+            <span class="spacer"></span>
+            <button class="btn btn-sm" @click="go('settings')">去设置</button>
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom:14px;padding:10px 14px">
+          <div class="row wrap" style="gap:8px;font-size:13px">
+            <span class="badge" :class="aghPendingCount ? 'warn' : 'ok'">{{ aghPendingCount ? aghPendingCount + ' 个客户端待更新' : '全部已是最新' }}</span>
+            <span class="badge">{{ aghManagedCount }} 个可管理 / 共 {{ agh.clients.length }} 个</span>
+            <span class="badge warn" v-if="agh.auto_sync && agh.write_allowed">自动同步已开启</span>
+            <span class="badge" v-else-if="agh.auto_sync" title="总开关「允许写回 AdGuard」未开，自动同步不会写入">自动同步已暂停（总开关未开）</span>
+            <span class="spacer"></span>
+            <button class="btn btn-sm" :disabled="aghBusy" @click="scanStale">扫描可清理的 id</button>
+          </div>
+          <div class="hint" style="margin-top:8px">
+            只有「能唯一归属到本系统某台设备」的客户端（标为可管理）才会被改写；其余一律只读展示、永不触碰。<br>
+            若某台设备在台账里最近一次观测超出了新鲜度阈值（3 倍采集间隔且不低于 20 分钟），说明采集可能失败过、
+            数据可能与 AdGuard 看到的不一致，批量/自动同步会<strong>自动跳过</strong>它，等下次采集成功后自动恢复。
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom:14px" v-if="aghStale.length">
+          <div class="card-title">可清理的 id
+            <span class="muted" style="font-size:12px">只移除下面列出的项；MAC 与当前 IP 一定保留</span>
+            <span class="spacer"></span>
+            <button class="btn btn-sm btn-danger" :disabled="!agh.write_allowed || aghBusy" @click="cleanStale(aghStale)">全部清理</button>
+          </div>
+          <div class="row wrap" style="gap:10px;margin-bottom:10px">
+            <div class="switch" :class="{on: aghIncludeUnknown}" @click="aghIncludeUnknown = !aghIncludeUnknown">
+              <span class="track"></span>一并清理未知项
+            </div>
+            <span class="muted" style="font-size:12px">未知项 = 本系统从未见过的 IP/MAC，可能是你手工加的，默认保留</span>
+          </div>
+          <div class="table-wrap">
+            <table class="tbl">
+              <thead><tr><th style="width:170px">客户端</th><th style="width:64px">现有</th><th>将移除</th><th style="width:64px">保留</th><th style="width:80px"></th></tr></thead>
+              <tbody>
+                <tr v-for="s in aghStale" :key="s.name">
+                  <td>{{ s.name }}<div class="muted" style="font-size:11.5px">{{ s.device_name || '—' }} · 台账 {{ fmtAge(s.data_age_sec) }}</div></td>
+                  <td>{{ s.total }}</td>
+                  <td>
+                    <span class="badge danger" v-for="x in s.stale" :key="x.id" style="margin:0 4px 4px 0" :title="x.why">{{ x.id }}</span>
+                    <span class="badge warn" v-for="x in s.unknown" :key="x.id" style="margin:0 4px 4px 0"
+                          :title="x.why + (aghIncludeUnknown ? '（已勾选：会一并清理）' : '（默认保留）')">{{ x.id }}</span>
+                    <div class="muted" style="font-size:11.5px;margin-top:2px" v-if="s.stale.length">{{ s.stale[0].why }}<span v-if="s.stale.length>1"> 等 {{ s.stale.length }} 项</span></div>
+                    <div class="muted" style="font-size:11.5px;margin-top:2px" v-else-if="s.unknown.length">只有未知项，默认不会被清理</div>
+                  </td>
+                  <td>{{ s.keep.length }}</td>
+                  <td><button class="btn btn-sm" :disabled="!agh.write_allowed || aghBusy" @click="cleanStale([s])">清理</button></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">AdGuard 持久客户端<span class="badge" style="margin-left:8px">{{ agh.clients.length }}</span>
+            <span class="spacer"></span>
+            <button class="btn btn-sm btn-ghost" :disabled="!aghManagedCount" @click="aghToggleSelAll">
+              {{ aghAllSelected ? '取消全选' : '全选可管理' }}
+            </button>
+          </div>
+          <div class="table-wrap">
+            <table class="tbl">
+              <thead><tr>
+                <th style="width:34px"></th>
+                <th style="width:190px">名称</th>
+                <th>识别地址 ids（含在本系统的映射）</th>
+                <th style="width:150px">关联设备</th>
+                <th style="width:130px">状态</th>
+                <th style="width:170px">操作</th>
+              </tr></thead>
+              <tbody>
+                <tr v-for="c in agh.clients" :key="c.name">
+                  <td><input type="checkbox" :checked="aghSel.includes(c.name)" :disabled="!c.managed" :title="c.managed ? '' : c.skip_reason" @change="aghToggleSel(c.name)"></td>
+                  <td>
+                    {{ c.name }}
+                    <div class="muted" style="font-size:11.5px">
+                      <span v-if="!c.use_global_settings">自定义设置</span>
+                      <span class="badge" style="margin-left:4px" v-for="t in (c.tags || [])" :key="t">{{ t }}</span>
+                    </div>
+                  </td>
+                  <td>
+                    <span v-for="m in c.mapped" :key="m.id" class="badge" style="margin:0 4px 4px 0"
+                          :class="m.device_name ? (m.current ? 'accent' : '') : ''"
+                          :title="m.device_name ? ('映射到：' + m.device_name + (m.current ? '（当前地址）' : '（历史地址，可清理）')) : '未映射到本系统设备'">
+                      <span class="mono">{{ m.id }}</span><span v-if="m.device_name"> → {{ m.device_name }}</span>
+                    </span>
+                  </td>
+                  <td class="dim">{{ c.device_name || '—' }}
+                    <div class="muted" style="font-size:11.5px" v-if="c.managed && c.device_name">台账 {{ fmtAge(c.data_age_sec) }}</div>
+                  </td>
+                  <td>
+                    <span class="badge ok" v-if="c.state==='ok'">已最新</span>
+                    <span class="badge warn" v-else-if="c.state==='pending'" :title="'将新增 ' + c.pending_add + ' 项、移除 ' + c.pending_remove + ' 项'">待更新 +{{ c.pending_add }}/−{{ c.pending_remove }}</span>
+                    <span class="badge" v-else :title="c.skip_reason">不参与同步</span>
+                    <span class="badge" v-if="c.unknown_count" style="margin-left:4px" title="本系统认不出的地址数（默认保留）">未知 {{ c.unknown_count }}</span>
+                    <span class="badge warn" v-if="c.managed && c.data_stale" style="margin-left:4px" :title="c.skip_reason || ('台账数据 ' + fmtAge(c.data_age_sec) + '，批量/自动同步会跳过它')">数据过旧</span>
+                  </td>
+                  <td>
+                    <button class="btn btn-sm" :disabled="!c.device_id || !agh.write_allowed || aghBusy"
+                            :title="c.device_id ? ('把这个客户端在 AdGuard 里的识别地址同步为「' + (c.device_name || '该设备') + '」当前的主 MAC + IPv4 + AdGuard 仍在统计的 IPv6（先预览再确认）') : '未能映射到本系统设备'"
+                            @click="previewAgh(c.name, c.device_id)">同步</button>
+                    <button class="btn btn-sm btn-ghost" :disabled="!agh.write_allowed || aghBusy" @click="deleteAgh(c.name)">删除</button>
+                  </td>
+                </tr>
+                <tr v-if="!agh.clients.length"><td colspan="6"><div class="empty">AdGuard 里暂无持久客户端<br><span class="hint">可用右上角「新建客户端」按设备创建一个</span></div></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="hint" style="margin-top:12px">
+            说明：AdGuard 的 id 全局唯一，若某 MAC 已被别的客户端占用，写入会失败而不是覆盖（预览里会直接标出冲突）。
+            写入 MAC 只对 IPv4 流量生效：AGH 靠 ARP/DHCP 认 MAC，认不出 IPv6，这是其机制限制；
+            所以 IPv6 只能靠「逐个写出地址」来归属。写哪些由 <b>AdGuard 自己的统计保留时长</b>决定（窗口内还在统计就写、没有了就删），本系统自动跟随，无需配置。
+          </div>
+        </div>
+      </template>
+
+      <!-- ---------- 拦截流量分析 ---------- -->
+      <template v-if="view==='sink'">
+        <div class="page-head">
+          <h2>拦截流量分析</h2>
+          <span class="desc">AdGuard 把被拦截的域名解析到本机后，客户端仍会真的连过来，这一页记录并分析这些连接。只记录，不回源、不转发任何流量</span>
+          <span class="spacer"></span>
+          <button class="btn btn-sm" :disabled="sinkBusy" @click="loadSink">刷新</button>
+          <button class="btn btn-sm" :disabled="!sinkStatus.running || sinkBusy" @click="sinkFlushNow">立即落库</button>
+          <a class="btn btn-sm" :href="sinkExportUrl" target="_blank" title="按当前筛选导出（最多 5 万行）">导出 CSV</a>
+        </div>
+
+        <div v-if="!sinkStatus.running" class="card" style="background:var(--warn-soft);border-color:transparent;margin-bottom:14px;padding:12px 14px;font-size:12.5px">
+          <div class="row wrap" style="gap:8px">
+            <b style="color:var(--warn)">监听未运行</b>
+            <span>需要在「设置 → 拦截流量分析」打开总开关；同时确认 AdGuard 的「拦截模式」已设为「自定义 IP → 本机地址」。</span>
+            <span class="spacer"></span>
+            <button class="btn btn-sm" @click="go('settings')">去设置</button>
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom:14px;padding:10px 14px">
+          <div class="row wrap" style="gap:10px;font-size:13px">
+            <span class="badge" :class="sinkStatus.running ? 'ok' : 'danger'">{{ sinkStatus.running ? '运行中' : '已停止' }}</span>
+            <span class="badge mono" v-for="p in (sinkStatus.ports || [])" :key="p.port"
+                  :class="p.error ? 'danger' : ''" :title="p.error || '监听正常'">:{{ p.port }}{{ p.error ? ' 失败' : '' }}</span>
+            <span class="badge" :class="sinkStatus.tls_mode === 'mitm' ? 'accent' : ''"
+                  :title="sinkStatus.tls_mode === 'mitm' ? '用本机自签 CA 动态签发证书，可读出 HTTPS 明文（需要目标设备信任该 CA）' : '只读取 TLS 握手里的 SNI，不做任何解密，无需客户端配合'">
+              {{ sinkStatus.tls_mode === 'mitm' ? 'MITM 解密' : '仅抓 SNI' }}
+            </span>
+            <span class="badge">应答：{{ sinkResponseLabel }}</span>
+            <span class="badge warn" v-if="sinkStatus.dropped_rows" title="超过「每秒最多新增行数」上限、未能写库的记录行数">限流丢弃 {{ fmtNum(sinkStatus.dropped_rows) }}</span>
+            <span class="badge" v-if="sinkStatus.agg_size" title="还在内存里聚合、尚未写库的事件数">缓冲 {{ sinkStatus.agg_size }}</span>
+            <span class="spacer"></span>
+            <span class="muted" style="font-size:12px" v-if="sinkStatus.last_flush_at">最近落库 {{ fmtTime(sinkStatus.last_flush_at) }}</span>
+          </div>
+          <div class="hint" style="margin-top:8px" v-if="sinkStatus.last_error">
+            <span style="color:var(--danger)">最近错误：{{ sinkStatus.last_error }}</span>
+          </div>
+        </div>
+
+        <div class="grid cols-4">
+          <div class="stat"><div class="label">连接次数</div><div class="value">{{ fmtNum(sink.ov.hits) }}</div><div class="extra">{{ rangeLabel }} · 去重后 {{ fmtNum(sink.ov.events) }} 行</div></div>
+          <div class="stat"><div class="label">被访问主机</div><div class="value">{{ fmtNum(sink.ov.hosts) }}</div><div class="extra">来自 SNI 或 Host 头</div></div>
+          <div class="stat"><div class="label">涉及设备</div><div class="value">{{ fmtNum(sink.ov.devices) }}</div><div class="extra">已归属 {{ fmtNum(sink.ov.mapped) }} / {{ fmtNum(sink.ov.events) }} 条</div></div>
+          <div class="stat"><div class="label">TLS 已解明文</div><div class="value">{{ sinkDecryptRate }}<span v-if="sinkDecryptRate!=='—'" style="font-size:14px">%</span></div><div class="extra">可读内容 {{ fmtNum(sink.ov.with_content) }} 条 / {{ fmtNum(sink.ov.with_content_hits) }} 次（含明文 HTTP）</div></div>
+        </div>
+
+        <div class="card" style="margin-top:14px">
+          <div class="card-title">连接趋势
+            <span class="muted" style="font-size:12px">按去重窗口合并后的次数；「可读内容」是其中能看到 URL 与正文的部分</span>
+          </div>
+          <div ref="sinkTrend" style="height:240px"></div>
+        </div>
+
+        <div class="grid cols-3" style="margin-top:14px">
+          <div class="card">
+            <div class="card-title">被拦截后仍发起连接的设备
+              <span class="muted" style="font-size:12px">点一行跳设备详情</span>
+            </div>
+            <div class="table-wrap" style="max-height:320px;overflow:auto" v-if="sink.devices.length">
+              <table class="tbl">
+                <thead><tr><th>设备</th><th style="width:80px">次数</th><th style="width:70px">主机</th></tr></thead>
+                <tbody>
+                  <tr v-for="d in sink.devices" :key="d.device_id" class="clickable" @click="openDevice(d.device_id)">
+                    <td class="ellipsis" :title="d.device_name">{{ d.device_name }}</td>
+                    <td style="color:var(--danger);font-weight:600">{{ fmtNum(d.hits) }}</td>
+                    <td class="muted">{{ fmtNum(d.hosts) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div v-else class="empty"><div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="2.5"/><circle cx="5" cy="5.5" r="1.6"/><circle cx="19" cy="5.5" r="1.6"/><circle cx="12" cy="19.5" r="1.6"/><path d="M6.4 6.9l3.8 3.2M17.6 6.9l-3.8 3.2M12 14.5v3.4"/></svg></div>暂无归属到设备的连接记录<br><span class="hint">本机地址与未归属的请求不计入设备统计</span></div>
+          </div>
+
+          <div class="card">
+            <div class="card-title">被访问主机 Top
+              <span class="muted" style="font-size:12px">最多 30 行，可滚动 · 点一行筛选</span>
+            </div>
+            <div class="table-wrap" style="max-height:320px;overflow:auto" v-if="sink.hosts.length">
+              <table class="tbl">
+                <thead><tr><th>主机名</th><th style="width:70px">次数</th><th style="width:56px">设备</th></tr></thead>
+                <tbody>
+                  <tr v-for="h in sink.hosts" :key="h.host" class="clickable" @click="sinkFilterBy('host', h.host)">
+                    <td class="mono ellipsis" :title="h.host">{{ h.host }}</td>
+                    <td style="color:var(--danger);font-weight:600">{{ fmtNum(h.hits) }}</td>
+                    <td class="muted">{{ h.devices }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div v-else class="empty"><div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="2.5"/><circle cx="5" cy="5.5" r="1.6"/><circle cx="19" cy="5.5" r="1.6"/><circle cx="12" cy="19.5" r="1.6"/><path d="M6.4 6.9l3.8 3.2M17.6 6.9l-3.8 3.2M12 14.5v3.4"/></svg></div>暂无数据</div>
+          </div>
+
+          <div class="card">
+            <div class="card-title">{{ sinkAggMode === 'ua' ? 'User-Agent Top' : '客户端指纹 Top（JA4）' }}
+              <span class="spacer"></span>
+              <div class="tabs" style="border:0;margin:0">
+                <div class="tab" :class="{active: sinkAggMode==='ua'}" @click="sinkAggMode='ua'">按 UA</div>
+                <div class="tab" :class="{active: sinkAggMode==='ja4'}" @click="sinkAggMode='ja4'">按指纹</div>
+              </div>
+            </div>
+
+            <template v-if="sinkAggMode === 'ua'">
+              <div class="table-wrap" style="max-height:320px;overflow:auto" v-if="sink.uas.length">
+                <table class="tbl">
+                  <thead><tr><th>User-Agent</th><th style="width:70px">次数</th><th style="width:56px">主机</th></tr></thead>
+                  <tbody>
+                    <tr v-for="u in sink.uas" :key="u.ua" class="clickable" @click="sinkFilterBy('ua', u.ua)">
+                      <td class="mono wrap-cell" :title="u.ua">{{ u.ua }}</td>
+                      <td style="color:var(--danger);font-weight:600">{{ fmtNum(u.hits) }}</td>
+                      <td class="muted">{{ u.hosts }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div v-else class="empty"><div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="2.5"/><circle cx="5" cy="5.5" r="1.6"/><circle cx="19" cy="5.5" r="1.6"/><circle cx="12" cy="19.5" r="1.6"/><path d="M6.4 6.9l3.8 3.2M17.6 6.9l-3.8 3.2M12 14.5v3.4"/></svg></div>暂无数据<br><span class="hint">只有拿到 HTTP 请求的记录才有 UA（仅 SNI 的记录没有）</span></div>
+            </template>
+
+            <template v-else>
+              <div class="table-wrap" style="max-height:320px;overflow:auto" v-if="sink.fps.length">
+                <table class="tbl">
+                  <thead><tr><th>JA4 指纹</th><th style="width:70px">次数</th><th style="width:56px">主机</th></tr></thead>
+                  <tbody>
+                    <tr v-for="f in sink.fps" :key="f.ja4" class="clickable" :title="fpTitle(f)" @click="sinkFilterBy('ja4', f.ja4)">
+                      <td class="mono wrap-cell">{{ f.ja4 }}</td>
+                      <td style="color:var(--danger);font-weight:600">{{ fmtNum(f.hits) }}</td>
+                      <td class="muted">{{ f.hosts }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div v-else class="empty"><div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="2.5"/><circle cx="5" cy="5.5" r="1.6"/><circle cx="19" cy="5.5" r="1.6"/><circle cx="12" cy="19.5" r="1.6"/><path d="M6.4 6.9l3.8 3.2M17.6 6.9l-3.8 3.2M12 14.5v3.4"/></svg></div>暂无数据<br><span class="hint">指纹由 ClientHello 算出，仅 SNI 的记录也有</span></div>
+            </template>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:14px">
+          <div class="card-title">流量详情
+            <span class="muted" style="font-size:12px">每条 = 一个客户端被拦后真实发起的一次连接（同一目标在去重窗口内合并为一行）；点任意一行展开完整内容</span>
+            <span class="spacer"></span>
+            <button class="btn btn-sm btn-ghost" :disabled="!sink.rows.length" @click="sinkExpandAllRows">展开全部</button>
+            <button class="btn btn-sm btn-ghost" :disabled="!sink.rows.length" @click="sinkCollapseAll">收起</button>
+          </div>
+
+          <div class="row wrap" style="margin-bottom:8px">
+            <select class="input" style="max-width:200px" v-model="sinkFilter.deviceId" @change="loadSink">
+              <option value="">全部设备</option>
+              <option v-for="d in devices" :key="d.id" :value="String(d.id)">{{ d.display_name }}</option>
+              <option value="local">路由器本机</option>
+              <option value="__none__">未归属（非本机）</option>
+            </select>
+            <select class="input" style="max-width:130px" v-model="sinkFilter.proto" @change="loadSink">
+              <option value="">全部协议</option>
+              <option value="http">明文 HTTP</option>
+              <option value="https">TLS(已解密)</option>
+              <option value="tls">TLS(仅 SNI)</option>
+              <option value="tcp">未知协议</option>
+            </select>
+            <select class="input" style="max-width:150px" v-model="sinkFilter.decrypted" @change="loadSinkEvents(1)">
+              <option value="">全部内容</option>
+              <option value="true">已解出明文</option>
+              <option value="false">仅 SNI / 未解密</option>
+            </select>
+            <select class="input" style="max-width:130px" v-model="sinkFilter.range" @change="loadSink">
+              <option value="1h">近 1 小时</option>
+              <option value="24h">近 24 小时</option>
+              <option value="7d">近 7 天</option>
+              <option value="30d">近 30 天</option>
+            </select>
+            <input class="input" style="max-width:210px" v-model.trim="sinkFilter.host" placeholder="主机名包含…" @keyup.enter="loadSinkEvents(1)">
+            <input class="input mono" style="max-width:250px" v-model.trim="sinkFilter.ja4" placeholder="JA4 指纹精确匹配…" @keyup.enter="loadSinkEvents(1)">
+          </div>
+          <div class="row wrap" style="margin-bottom:12px">
+            <input class="input" style="max-width:220px" v-model.trim="sinkFilter.ua" placeholder="User-Agent 包含…（如 okhttp / Dalvik / Go-http）" @keyup.enter="loadSinkEvents(1)">
+            <input class="input" style="max-width:190px" v-model.trim="sinkFilter.q" placeholder="查询串包含…" @keyup.enter="loadSinkEvents(1)">
+            <select class="input" style="max-width:140px" v-model="sinkFilter.bodyKind" @change="loadSinkEvents(1)">
+              <option value="">全部正文类型</option>
+              <option value="json">JSON</option>
+              <option value="form">表单</option>
+              <option value="multipart">上传(multipart)</option>
+              <option value="xml">XML</option>
+              <option value="text">纯文本</option>
+              <option value="binary">二进制</option>
+            </select>
+            <input class="input" style="max-width:230px" v-model.trim="sinkFilter.body" placeholder="正文包含…（含结构化字段的值）" @keyup.enter="loadSinkEvents(1)">
+            <input class="input" style="max-width:110px" type="number" v-model.number="sinkFilter.lport" placeholder="端口" @keyup.enter="loadSinkEvents(1)">
+            <select class="input" style="max-width:130px" v-model="sinkFilter.outcome" @change="loadSinkEvents(1)">
+              <option value="">全部应答</option>
+              <option value="empty">204 空响应</option>
+              <option value="closed">直接关闭</option>
+              <option value="page">提示页</option>
+              <option value="error">握手失败</option>
+            </select>
+            <button class="btn" @click="loadSinkEvents(1)">查询</button>
+            <button class="btn btn-sm btn-ghost" @click="sinkClearFilters">清空筛选</button>
+            <span class="spacer"></span>
+            <button class="btn btn-sm btn-danger" @click="sinkClearAll">清空全部记录</button>
+          </div>
+
+          <div class="row wrap" style="gap:10px;margin-bottom:12px" v-if="sink.unmapped.length">
+            <span class="badge warn">有 {{ sink.unmapped.length }} 个 IP 的连接未能归属到设备</span>
+            <span class="muted" style="font-size:12px">点「采集设备」更新邻居表后会自动回溯；也可在下方直接指派</span>
+            <span class="spacer"></span>
+            <button class="btn btn-sm" @click="sinkShowUnmapped = !sinkShowUnmapped">{{ sinkShowUnmapped ? '收起' : '查看并指派' }}</button>
+            <button class="btn btn-sm btn-danger" @click="sinkPruneUnmapped">清理这些未归属记录</button>
+          </div>
+
+          <div class="card" v-if="sinkShowUnmapped && sink.unmapped.length" style="background:var(--bg-soft);margin-bottom:12px;padding:12px">
+            <div class="table-wrap" style="max-height:260px;overflow:auto">
+              <table class="tbl">
+                <thead><tr><th>客户端 IP</th><th style="width:70px">条数</th><th style="width:80px">次数</th><th style="width:150px">最近出现</th><th>样本主机</th><th style="width:110px"></th></tr></thead>
+                <tbody>
+                  <tr v-for="u in sink.unmapped" :key="u.ip">
+                    <td class="mono">{{ u.ip }}</td>
+                    <td>{{ fmtNum(u.c) }}</td>
+                    <td>{{ fmtNum(u.hits) }}</td>
+                    <td class="muted">{{ fmtTime(u.last_ts) }}</td>
+                    <td class="mono muted ellipsis" :title="u.sample_host">{{ u.sample_host || '—' }}</td>
+                    <td><button class="btn btn-sm" @click="openSinkAssign(u.ip)">指派给设备</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <!-- fixed 布局下列宽由表头决定，溢出才会真正变成省略号。
+                 「来源 IP」列必须留够宽度并允许换行（.wrap-cell），否则 IPv6 会叠到右边两列。 -->
+            <table class="tbl" style="table-layout:fixed">
+              <thead><tr>
+                <th style="width:100px">时间</th><th style="width:46px">次数</th><th style="width:106px">设备</th>
+                <th style="width:168px">来源 IP</th><th style="width:112px">协议/端口</th>
+                <th>主机名与请求</th><th style="width:110px">内容</th>
+              </tr></thead>
+              <tbody>
+                <template v-for="r in sink.rows" :key="r.id">
+                  <tr class="clickable" @click="sinkExpandId = sinkExpandId === r.id ? null : r.id">
+                    <td class="muted ellipsis" :title="timeTitle(r)">{{ fmtTimeShort(r.ts) }}</td>
+                    <td><span class="badge" :class="r.hits > 1 ? 'warn' : ''">{{ r.hits }}</span></td>
+                    <td class="ellipsis" :title="r.device_name || ''">{{ r.device_name || '—' }}</td>
+                    <td class="mono muted wrap-cell">{{ r.client_ip || '—' }}</td>
+                    <td>
+                      <span class="badge" :class="r.proto === 'https' ? 'accent' : (r.proto === 'http' ? '' : '')">{{ r.proto || '?' }}</span>
+                      <span class="mono muted" style="margin-left:4px">:{{ r.lport }}</span>
+                    </td>
+                    <td>
+                      <div class="mono ellipsis" :title="r.host || ''">{{ r.host || '（无 SNI / Host）' }}</div>
+                      <div class="muted mono ellipsis" style="font-size:11.5px" v-if="reqLineText(r)" :title="reqLineText(r)">{{ reqLineText(r) }}</div>
+                    </td>
+                    <td>
+                      <span class="badge xs ok" v-if="r.decrypted || r.proto === 'http'">明文</span>
+                      <span class="badge xs" v-else title="只拿到 SNI / 未解密">仅SNI</span>
+                      <!-- 正文类型直接当徽章；悬停提示不放正文原文（可能几十 KB，会撑大 DOM） -->
+                      <span class="badge xs accent" v-if="r.body_kind" :title="'正文类型：' + bodyKindLabel(r.body_kind) + '（展开本行看内容）'">{{ bodyKindLabel(r.body_kind) }}</span>
+                      <span class="badge xs" v-else-if="r.body_preview" title="有正文可看，展开本行即可">正文</span>
+                      <span class="badge xs warn" v-if="r.tls_note" :title="r.tls_note">备注</span>
+                    </td>
+                  </tr>
+                  <tr v-if="sinkExpandAll || sinkExpandId === r.id">
+                    <td colspan="7" style="background:var(--bg-soft);padding:12px">
+                      <pre class="raw" style="max-height:420px;white-space:pre-wrap">{{ sinkDetailText(r) }}</pre>
+                    </td>
+                  </tr>
+                </template>
+                <tr v-if="!sink.rows.length"><td colspan="7"><div class="empty"><div class="big"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="2.5"/><circle cx="5" cy="5.5" r="1.6"/><circle cx="19" cy="5.5" r="1.6"/><circle cx="12" cy="19.5" r="1.6"/><path d="M6.4 6.9l3.8 3.2M17.6 6.9l-3.8 3.2M12 14.5v3.4"/></svg></div>暂无连接记录<br><span class="hint">先在设置里打开「拦截流量分析」，再把 AdGuard 的拦截模式指向本机</span></div></td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="pager" v-if="sink.total">
+            <span>共 {{ fmtNum(sink.total) }} 条 · 第 {{ sink.page }} / {{ Math.max(1, Math.ceil(sink.total / sink.size)) }} 页</span>
+            <button class="btn btn-sm" :disabled="sink.page <= 1" @click="loadSinkEvents(sink.page - 1)">上一页</button>
+            <button class="btn btn-sm" :disabled="sink.page * sink.size >= sink.total" @click="loadSinkEvents(sink.page + 1)">下一页</button>
+          </div>
+
+          <div class="hint" style="margin-top:12px">
+            <b>次数</b>是同一「客户端 + 端口 + 主机 + 方法 + 路径」在去重窗口内被合并的次数。被拦的 App 常以秒级频率重试，
+            合并后同一次行为只占一行，磁盘才不会被写爆。<br>
+            <b>明文 / 仅 SNI</b>：只有客户端信任本机自签 CA 时才能解出 HTTPS 的 URL 与正文；证书固定（pinning）的客户端会握手失败，
+            这时只记得到 SNI，并在备注里写明原因。<br>
+            本页只记录，<b>不会把请求转发到任何真实服务器</b>，也不会向路由器 / AdGuard 写入任何配置。
+          </div>
+        </div>
+      </template>
+
+      <!-- ---------- 设置 ---------- -->
+      <template v-if="view==='settings'">
+        <div class="page-head"><h2>设置</h2><span class="desc">连接、采集策略与安全</span></div>
+
+        <div class="card">
+          <div class="card-title">连接配置
+            <button class="btn btn-sm" @click="openConn(null,'ssh')">+ 新增 SSH</button>
+          </div>
+          <div class="table-wrap">
+            <table class="tbl">
+              <thead><tr><th style="width:80px">类型</th><th>名称</th><th>地址</th><th style="width:120px">账号</th><th style="width:90px">认证</th><th style="width:80px">状态</th><th style="width:180px">操作</th></tr></thead>
+              <tbody>
+                <tr v-for="c in connections" :key="c.id">
+                  <td><span class="badge" :class="c.kind==='ssh'?'accent':''">{{ c.kind === 'ssh' ? 'SSH' : 'AdGuard' }}</span></td>
+                  <td>{{ c.name }}</td>
+                  <td class="mono dim">{{ c.kind === 'ssh' ? (c.host + ':' + (c.port||22)) : c.base_url }}</td>
+                  <td class="mono">{{ c.username }}</td>
+                  <td class="muted">{{ c.auth_type === 'key' ? '密钥' : '密码' }}</td>
+                  <td><span class="badge" :class="c.enabled?'ok':''">{{ c.enabled ? '启用' : '停用' }}</span></td>
+                  <td>
+                    <button class="btn btn-sm" @click="testConn(c)">测试</button>
+                    <button class="btn btn-sm btn-ghost" @click="openConn(c)">编辑</button>
+                    <button class="btn btn-sm btn-danger" @click="delConn(c)">删除</button>
+                  </td>
+                </tr>
+                <tr v-if="!connections.length"><td colspan="7"><div class="empty"><div class="big">🔌</div>还没有连接配置<br><span class="hint">至少需要一个 AdGuard 连接；要自动发现设备还需要一个路由器 SSH 连接</span></div></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="hint">SSH 取路由器的 DHCP 租约与邻居表（MAC↔IP），AdGuard 走面板 API。</div>
+        </div>
+
+        <div class="card" style="margin-top:14px">
+          <div class="card-title">写回 AdGuard
+            <span class="muted" style="font-size:12px">两项都默认关闭</span>
+          </div>
+
+          <div class="row wrap" style="gap:10px;margin-bottom:8px">
+            <div class="switch" :class="{on: isAghWriteOn}" @click="toggleAghWrite" title="默认关闭">
+              <span class="track"></span>允许写回 AdGuard
+            </div>
+            <span class="badge" :class="isAghWriteOn ? 'warn' : 'ok'">{{ isAghWriteOn ? '已开启' : '已关闭（默认）' }}</span>
+          </div>
+          <div class="hint">
+            写回功能总开关，关闭后「AdGuard 客户端」页的写回和下面的自动同步都不生效。写入前有差异预览，写入内容是「主 MAC + 当前 IPv4 + 该设备仍在产生的 IPv6」，不写历史 IP 和 fe80::。
+          </div>
+
+          <div class="hint" style="margin-top:12px;padding:10px 12px;background:var(--bg-soft);border-radius:8px">
+            写哪些 IPv6 跟随 AdGuard 的「统计保留时长」窗口
+            <template v-if="settings.agh_stats_interval_ms">（当前 <b>{{ fmtWindow(settings.agh_stats_interval_ms / 1000) }}</b>）</template>
+            ：窗口内还有查询的写入 ids，没有查询的删掉；fe80::、回环、组播不写。
+          </div>
+
+          <hr style="border:0;border-top:1px solid var(--border-soft);margin:16px 0 14px">
+
+          <div class="row wrap" style="gap:10px;margin-bottom:8px">
+            <div class="switch" :class="{on: isAghAutoSyncOn, disabled: !isAghWriteOn}" @click="toggleAghAutoSync"
+                 :title="isAghWriteOn ? '默认关闭' : '需先打开上面的「允许写回 AdGuard」'">
+              <span class="track"></span>定时自动同步 ids
+            </div>
+            <span class="badge" :class="aghAutoSyncBadge">{{ aghAutoSyncLabel }}</span>
+            <span class="spacer"></span>
+            <label class="field" style="min-width:170px">
+              <span>同步间隔（秒）</span>
+              <input class="input" type="number" min="60" v-model.number="settings.agh_sync_interval_sec">
+            </label>
+            <button class="btn btn-sm" @click="saveSettings">保存间隔</button>
+          </div>
+          <div class="hint">
+            需先打开上面的「允许写回 AdGuard」才会写入。只更新 ids：不新建、不删除客户端，也不动上游/过滤/标签，且只处理能唯一归属到本系统某台设备的客户端。<br>
+            认不出的 MAC / IPv4 默认保留，要清需显式勾选；采集超时的客户端本轮跳过。
+          </div>
+        </div>
+
+        <div class="grid cols-2" style="margin-top:14px">
+          <div class="card">
+            <div class="card-title">采集策略</div>
+            <div class="row wrap" style="gap:18px">
+              <label class="field" style="min-width:180px">
+                <span>设备采集间隔（秒）</span>
+                <input class="input" type="number" min="30" v-model.number="settings.collect_interval_sec">
+              </label>
+              <label class="field" style="min-width:180px">
+                <span>日志摄取间隔（秒）</span>
+                <input class="input" type="number" min="30" v-model.number="settings.ingest_interval_sec">
+              </label>
+              <label class="field" style="min-width:180px">
+                <span>从 AdGuard 抓取范围（天）</span>
+                <input class="input" type="number" min="1" v-model.number="settings.backfill_days">
+              </label>
+              <label class="field" style="min-width:180px">
+                <span>每次重叠多取（分钟）</span>
+                <input class="input" type="number" min="1" v-model.number="settings.ingest_lookback_min">
+              </label>
+            </div>
+            <label class="field"><span>网关/本机地址（逗号分隔，不计入设备，日志中标为「路由器本机」）</span>
+              <input class="input mono" v-model="settings.router_ips">
+            </label>
+            <div class="hint" style="margin-bottom:12px">
+              抓取范围越大首次摄取越慢；重叠多取用于补上次断点前的边界，重复的会自动去重。
+            </div>
+            <div class="hint" style="margin-bottom:12px">采集全程只读：SSH 只跑 <span class="mono">cat /tmp/dhcp.leases</span>、<span class="mono">ip neigh</span> 这类命令，AdGuard 只调只读接口。</div>
+            <button class="btn btn-primary" @click="saveSettings">保存设置</button>
+          </div>
+
+          <div class="card">
+            <div class="card-title">数据与安全</div>
+            <div class="row" style="gap:10px">
+              <label class="field" style="flex:1"><span>本地日志保留（天，0=永久）</span><input class="input" type="number" min="0" v-model.number="settings.log_retention_days"></label>
+              <label class="field" style="flex:1"><span>IP 历史保留（天，0=永久）</span><input class="input" type="number" min="0" v-model.number="settings.ip_history_retention_days"></label>
+            </div>
+            <div class="hint" style="margin-bottom:10px">只决定本系统自己存多少，与 AdGuard 的保留期无关。</div>
+            <div class="row wrap" style="gap:8px;margin-bottom:14px">
+              <button class="btn btn-sm" @click="saveSettings">保存设置</button>
+              <button class="btn btn-sm" @click="updateOui">更新厂商库</button>
+              <span class="badge" v-if="ouiStats.count">已收录 {{ fmtNum(ouiStats.count) }} 条 OUI</span>
+              <span class="badge warn" v-else>厂商库为空，点「更新厂商库」在线拉取</span>
+            </div>
+            <hr style="border:0;border-top:1px solid var(--border-soft);margin:6px 0 14px">
+            <div class="row wrap" style="gap:8px;margin-bottom:8px">
+              <b style="font-size:13px">本地数据库</b>
+              <span class="badge" v-if="dbInfo">体积 {{ dbInfo.fileMB }} MB · 日志 {{ fmtNum(dbInfo.rows) }} 行 · 流量 {{ fmtNum(dbInfo.sink_rows) }} 行 · 设备 {{ dbInfo.devices }} 台 · 未归属 {{ fmtNum(dbInfo.unmapped) }} 行</span>
+              <span class="badge" v-if="dbInfo && dbInfo.lastVacuum">上次整理 {{ fmtTime(dbInfo.lastVacuum) }}</span>
+            </div>
+            <div class="row wrap" style="gap:8px;margin-bottom:10px">
+              <button class="btn btn-sm" @click="loadDbInfo">刷新信息</button>
+              <a class="btn btn-sm" href="/api/backup/db" target="_blank" title="下载 SQLite 一致性快照（不含 secret.key）">下载数据库快照</a>
+              <button class="btn btn-sm" :disabled="busy" @click="vacuumNow">立即整理（VACUUM）</button>
+            </div>
+            <div class="hint" style="margin-bottom:14px">完整备份请复制服务器上的 <span class="mono">data/</span> 目录（含 <span class="mono">secret.key</span>，否则凭据无法解密）。</div>
+            <hr style="border:0;border-top:1px solid var(--border-soft);margin:6px 0 14px">
+            <div class="row" style="gap:10px">
+              <label class="field" style="flex:1"><span>原密码</span><input class="input" type="password" v-model="pwd.old"></label>
+              <label class="field" style="flex:1"><span>新密码</span><input class="input" type="password" v-model="pwd.next"></label>
+            </div>
+            <button class="btn" @click="changePwd">修改密码</button>
+            <div class="hint">凭据用 AES-256-GCM 加密后存入本地 SQLite。</div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:14px">
+          <div class="card-title">拦截流量分析
+            <span class="muted" style="font-size:12px">默认关闭；关闭时不占用任何端口</span>
+            <span class="spacer"></span>
+            <span class="badge" :class="sinkStatus.running ? 'ok' : ''">{{ sinkStatus.running ? '运行中' : '未运行' }}</span>
+            <span class="badge warn" v-if="sinkDirty" title="改动只改了浏览器里的值，点「保存设置」才会写回服务端并重新监听">有未保存的改动</span>
+          </div>
+
+          <div class="row wrap" style="gap:10px;margin-bottom:10px">
+            <div class="switch" :class="{on: isSinkOn}" @click="settings.sink_enabled = isSinkOn ? '0' : '1'" title="默认关闭">
+              <span class="track"></span>启用拦截流量分析监听
+            </div>
+            <span class="badge" :class="isSinkOn ? 'warn' : 'ok'">{{ isSinkOn ? '已开启' : '已关闭（默认）' }}</span>
+          </div>
+
+          <div class="hint" style="margin-bottom:12px">
+            需要把 AdGuard 的「拦截模式」设为 <b>自定义 IP → 本机地址</b>，默认模式返回 0.0.0.0/::，客户端不会连过来。被拦域名解析到本机后，本功能在这些端口上等它来连并记录请求，不转发也不回源。<br>
+            <b class="t-danger">开启后可能会导致电视投屏失败。</b>被拦域名连不到真实服务器，视频类 App 投屏与播放链路里被命中的域名会失效，出现这种情况先关闭本功能或放行域名。
+          </div>
+
+          <div class="row wrap" style="gap:18px">
+            <label class="field" style="min-width:190px"><span>绑定地址（留空 = 全部网卡）</span>
+              <input class="input mono" v-model.trim="settings.sink_bind_ip" placeholder="192.168.1.100">
+            </label>
+            <label class="field" style="min-width:140px"><span>明文端口</span>
+              <input class="input" type="number" min="1" max="65535" v-model.number="settings.sink_http_port">
+            </label>
+            <label class="field" style="min-width:140px"><span>TLS 端口</span>
+              <input class="input" type="number" min="1" max="65535" v-model.number="settings.sink_https_port">
+            </label>
+            <label class="field" style="min-width:210px"><span>额外端口（逗号分隔，可留空）</span>
+              <input class="input mono" v-model.trim="settings.sink_extra_ports" placeholder="8080,8443">
+            </label>
+          </div>
+
+          <div class="row wrap" style="gap:18px;margin-bottom:6px">
+            <label class="field" style="min-width:230px"><span>TLS 处理方式</span>
+              <select class="input" v-model="settings.sink_tls_mode">
+                <option value="sni">只读 SNI（不解密，客户端无需装证书）</option>
+                <option value="mitm">解密（可读 HTTPS 明文，需客户端信任根证书）</option>
+              </select>
+            </label>
+            <label class="field" style="min-width:230px"><span>对客户端的应答</span>
+              <select class="input" v-model="settings.sink_response">
+                <option value="empty">204 空响应（客户端按「成功、无内容」处理）</option>
+                <option value="close">直接关闭连接（客户端按请求中断处理）</option>
+                <option value="page">返回提示页（浏览器手动访问时更直观）</option>
+              </select>
+            </label>
+            <label class="field" style="min-width:120px"><span>保留天数（0=永久）</span>
+              <input class="input" type="number" min="0" v-model.number="settings.sink_retention_days">
+            </label>
+          </div>
+
+          <div class="hint" style="margin-bottom:12px">
+            <b>只读 SNI</b>：只取 SNI / ALPN，不握手，客户端无需装证书，看不到 URL 与正文。<br>
+            <b>解密</b>：签发证书终止 TLS，可读完整 URL、头部与正文，需目标设备信任下面的根证书；证书固定（pinning）的 App 会握手失败，那种情况也只记得到 SNI。<br>
+            <b>应答方式</b>只影响客户端怎么感知失败，三种应答抓到的内容一样；它不能让被拦域名重新可用，真正依赖的域名只能放行。
+          </div>
+
+          <div class="row wrap" style="gap:22px;margin-bottom:10px">
+            <div class="switch" :class="{on: isSinkHeadersOn}" @click="settings.sink_capture_headers = isSinkHeadersOn ? '0' : '1'">
+              <span class="track"></span>采集完整头部
+            </div>
+            <div class="switch" :class="{on: isSinkBodyOn}" @click="settings.sink_capture_body = isSinkBodyOn ? '0' : '1'">
+              <span class="track"></span>采集正文预览
+            </div>
+            <label class="field" style="min-width:180px"><span>正文预览长度（字节）</span>
+              <input class="input" type="number" min="32" max="16384" v-model.number="settings.sink_body_preview_bytes">
+            </label>
+            <label class="field" style="min-width:180px"><span>正文等待超时（毫秒）</span>
+              <input class="input" type="number" min="100" max="10000" step="100" v-model.number="settings.sink_body_wait_ms">
+            </label>
+          </div>
+          <div class="hint" style="margin-bottom:12px">
+            长度按解压后算，解不开则存 hex；charset 优先用 Content-Type 声明的，没声明时对疑似 GBK/GB18030 的正文试解一次。末尾「已截断」表示正文更长或上传超时。
+          </div>
+          <div class="hint" style="margin-bottom:12px">
+            完整头部可能含 Cookie / Authorization，正文可能含序列号、账号，所以默认关闭；开启后明文存入本地 SQLite，自行判断合规性。只对之后新采集的记录生效，旧记录不回填。
+          </div>
+
+          <div class="row wrap" style="gap:18px;margin-bottom:10px">
+            <label class="field" style="min-width:200px"><span>去重窗口（秒）</span>
+              <input class="input" type="number" min="5" v-model.number="settings.sink_dedup_window_sec">
+            </label>
+            <label class="field" style="min-width:200px"><span>每秒最多新增行数</span>
+              <input class="input" type="number" min="1" v-model.number="settings.sink_max_rows_per_sec">
+            </label>
+            <label class="field" style="min-width:170px"><span>未知协议首包预览（字节）</span>
+              <input class="input" type="number" min="8" max="256" v-model.number="settings.sink_tcp_preview_bytes">
+            </label>
+          </div>
+          <div class="hint" style="margin-bottom:12px">
+            同一「客户端 + 端口 + 主机 + 方法 + 路径」在窗口内合并成一行并累加次数；超过「每秒最多新增行数」的部分只计数不入库。
+          </div>
+
+          <div class="row wrap" style="gap:8px;margin-bottom:8px">
+            <a class="btn btn-sm" href="/api/sink/ca.crt" target="_blank">下载根证书（.crt）</a>
+            <span class="badge" v-if="sinkStatus.certs" :title="'SHA-256 指纹（安装前请核对）' + sinkStatus.certs.fingerprint_sha256">
+              指纹 {{ (sinkStatus.certs.fingerprint_sha256 || '').slice(0, 23) }}…
+            </span>
+            <span class="badge" v-if="sinkStatus.certs">签名缓存 {{ sinkStatus.certs.cache_size }}/{{ sinkStatus.certs.cache_max }} · 平均 {{ sinkStatus.certs.avg_sign_ms }} ms</span>
+            <span class="badge" v-else>根证书在使用「解密」模式后才会生成</span>
+          </div>
+          <div class="hint" style="margin-bottom:12px">
+            根证书只在本机自用，装到目标设备后才会拿到 HTTPS 明文；分发前核对上面的 SHA-256 指纹。签发是同步运算，故做了缓存与限流，超出预算的握手会失败但仍记录 SNI。
+          </div>
+
+          <div class="row wrap" style="gap:8px">
+            <button class="btn btn-primary" @click="saveSettings">保存设置</button>
+            <span class="muted" style="font-size:12px">保存后立即按新配置重新监听。</span>
+          </div>
+        </div>
+
+        <div class="card sysinfo-card" style="margin-top:14px">
+          <div class="card-title">运行环境
+            <span class="muted" style="font-size:12px">运行本系统的这台机器（不是路由器），数据全部来自本机 /proc 与 /sys，只读</span>
+            <span class="spacer"></span>
+            <span class="badge" v-if="sys.host.is_docker">Docker 运行</span>
+            <button class="btn btn-sm" :disabled="sysBusy" @click="loadSysinfo">刷新</button>
+          </div>
+
+          <div v-if="!sysLoaded" class="empty">正在读取系统信息…</div>
+          <template v-else>
+            <div class="kv">
+              <div class="k">主机名</div><div class="mono">{{ sys.host.hostname }}</div>
+              <template v-if="sys.host.board">
+                <div class="k">整机型号</div><div>{{ sys.host.board }}</div>
+              </template>
+              <div class="k">操作系统</div><div>{{ sys.host.distro || sys.host.platform }}</div>
+              <div class="k">内核 / 架构</div><div class="mono">{{ sys.host.kernel }} · {{ sys.host.arch }}</div>
+              <div class="k">系统运行时长</div><div>{{ fmtDur(sys.host.uptime_sec) }}</div>
+
+              <div class="k">处理器</div><div>{{ sys.cpu.soc || sys.cpu.model }}（{{ sys.cpu.cores }} 核）</div>
+              <div class="k">CPU 频率（当前 / 最高）</div><div class="mono">{{ cpuFreqText }}</div>
+              <div class="k">CPU 温度{{ sys.cpu.temp_type ? '（' + sys.cpu.temp_type + '）' : '' }}</div>
+              <div :class="cpuTempClass">{{ sys.cpu.temp === null || sys.cpu.temp === undefined ? '不可用' : sys.cpu.temp + ' °C' }}</div>
+              <div class="k">负载（1 / 5 / 15 分钟）</div><div class="mono">{{ cpuLoadText }}</div>
+
+              <div class="k">内存（已用 / 总量）</div>
+              <div>
+                {{ fmtBytes(sys.memory.used) }} / {{ fmtBytes(sys.memory.total) }}（{{ sys.memory.used_pct }}%）<span class="muted" v-if="sys.memory.swap_total"> · Swap {{ fmtBytes(sys.memory.swap_total - sys.memory.swap_free) }}/{{ fmtBytes(sys.memory.swap_total) }}</span>
+                <div class="bar" style="margin-top:5px"><i :style="{ width: (sys.memory.used_pct || 0) + '%' }"></i></div>
+              </div>
+
+              <template v-if="sys.disk">
+                <div class="k">数据目录磁盘（已用 / 总量）</div>
+                <div>
+                  {{ fmtBytes(sys.disk.used) }} / {{ fmtBytes(sys.disk.total) }}（{{ sys.disk.used_pct }}%） · 剩余 {{ fmtBytes(sys.disk.free) }}
+                  <div class="bar" :class="sys.disk.used_pct >= 90 ? 'blocked' : ''" style="margin-top:5px"><i :style="{ width: (sys.disk.used_pct || 0) + '%' }"></i></div>
+                </div>
+              </template>
+
+              <div class="k">Node / 程序版本</div><div class="mono">{{ sys.runtime.node }} · v{{ sys.runtime.app_version }}</div>
+              <div class="k">程序运行时长</div><div>{{ fmtDur(sys.runtime.app_uptime_sec) }} <span class="muted">（启动于 {{ fmtTime(sys.runtime.started_at) }}）</span></div>
+              <div class="k">程序内存占用 (RSS)</div><div>{{ fmtBytes(sys.runtime.rss) }}</div>
+              <div class="k">数据目录</div><div class="mono ellipsis" :title="sys.runtime.data_dir">{{ sys.runtime.data_dir }}</div>
+            </div>
+
+            <div class="row wrap" style="gap:6px;margin-top:14px" v-if="sys.cpu.temps.length > 1">
+              <span class="muted" style="font-size:12px">全部温度传感器</span>
+              <span class="badge mono" v-for="t in sys.cpu.temps" :key="t.zone">{{ t.type }} {{ t.temp }}°C</span>
+            </div>
+            <div class="row wrap" style="gap:6px;margin-top:8px" v-if="sys.net.length">
+              <span class="muted" style="font-size:12px">网卡</span>
+              <span class="badge mono" v-for="n in sys.net" :key="n.name">{{ n.name }} · {{ (n.ip4 || []).concat(n.ip6 || []).join(' / ') || '—' }}</span>
+            </div>
+            <div class="hint" style="margin-top:10px">
+              CPU 温度 ≥ 65°C 标黄、≥ 75°C 标红。磁盘快满时，到「数据与安全」调小保留天数并整理数据库。
+            </div>
+          </template>
+        </div>
+      </template>
+
+    </main>
+  </div>
+
+  <!-- ============ 编辑设备 ============ -->
+  <div class="modal-mask" v-if="deviceModal" @click.self="deviceModal=false">
+    <div class="modal">
+      <h3>编辑设备</h3>
+      <div class="row" style="margin-bottom:12px">
+        <span class="badge accent mono">{{ editing.mac || editing.anchor }}</span>
+        <span class="badge">{{ editing.ip_count }} 个 IP</span>
+        <span class="badge warn" v-if="editing.random_mac">随机MAC</span>
+      </div>
+      <label class="field"><span>中文名（备注）</span><input class="input" v-model.trim="editing.name" placeholder="例如：客厅电视"></label>
+      <div class="row" style="gap:10px">
+        <label class="field" style="flex:1"><span>分类</span>
+          <select class="input" v-model="editing.category">
+            <option value="">未分类</option>
+            <option v-for="c in categories" :key="c.k" :value="c.k">{{ c.label }}</option>
+          </select>
+        </label>
+        <label class="field" style="flex:1"><span>厂商（可手填）</span><input class="input" v-model.trim="editing.vendor"></label>
+      </div>
+      <label class="field"><span>标签（逗号分隔）</span><input class="input" v-model="editing.tagsText" placeholder="例如：客厅, 常用"></label>
+      <label class="field"><span>备注</span><textarea class="input" v-model.trim="editing.notes"></textarea></label>
+      <div class="row wrap" style="gap:22px;margin:6px 0 4px">
+        <div class="switch" :class="{on: editing.ignored}" @click="editing.ignored = editing.ignored ? 0 : 1"><span class="track"></span>忽略该设备</div>
+      </div>
+      <div class="actions">
+        <button class="btn btn-danger" @click="removeDevice(editing)">删除</button>
+        <span class="spacer"></span>
+        <button class="btn" @click="deviceModal=false">取消</button>
+        <button class="btn btn-primary" @click="saveDevice">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 合并设备 ============ -->
+  <div class="modal-mask" v-if="mergeModal" @click.self="mergeModal=false">
+    <div class="modal">
+      <h3>合并设备</h3>
+      <div class="hint" style="margin-bottom:14px">把「{{ mergeSource.display_name }}」合并到目标设备：MAC、IP 历史与日志都会归到目标设备。</div>
+      <div class="field"><span>目标设备（可搜索）</span>
+        <device-picker v-model="mergeTargetId" :devices="devices" :exclude="[mergeSource.id]"
+                       placeholder="搜索：名称 / 主机名 / MAC / IP / 厂商"></device-picker>
+      </div>
+      <div class="actions">
+        <button class="btn" @click="mergeModal=false">取消</button>
+        <button class="btn btn-primary" :disabled="!mergeTargetId" @click="doMerge">确认合并</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 连接编辑 ============ -->
+  <div class="modal-mask" v-if="connModal" @click.self="connModal=false">
+    <div class="modal">
+      <h3>{{ connForm.id ? '编辑连接' : '新增连接' }}</h3>
+      <label class="field"><span>类型</span>
+        <select class="input" v-model="connForm.kind">
+          <option value="ssh">SSH（路由器）</option>
+          <option value="adguard">AdGuard Home（HTTP API）</option>
+        </select>
+      </label>
+      <label class="field"><span>名称</span><input class="input" v-model.trim="connForm.name" placeholder="例如：主路由 iStoreOS"></label>
+
+      <template v-if="connForm.kind==='ssh'">
+        <div class="row" style="gap:10px">
+          <label class="field" style="flex:2"><span>主机</span><input class="input" v-model.trim="connForm.host" placeholder="192.168.1.1"></label>
+          <label class="field" style="flex:1"><span>端口</span><input class="input" type="number" v-model.number="connForm.port" placeholder="22"></label>
+        </div>
+        <label class="field"><span>用户名</span><input class="input" v-model.trim="connForm.username" placeholder="root"></label>
+        <label class="field"><span>认证方式</span>
+          <select class="input" v-model="connForm.auth_type">
+            <option value="password">密码</option>
+            <option value="key">私钥</option>
+          </select>
+        </label>
+        <label class="field" v-if="connForm.auth_type==='password'">
+          <span>密码{{ connForm.id ? '（留空表示不修改）' : '' }}</span>
+          <input class="input" type="password" v-model="connForm.secret">
+        </label>
+        <template v-else>
+          <label class="field"><span>私钥内容（PEM）{{ connForm.id ? '（留空表示不修改）' : '' }}</span>
+            <textarea class="input mono" style="min-height:130px" v-model="connForm.secret" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+          </label>
+          <label class="field"><span>私钥口令（可空）</span><input class="input" type="password" v-model="connForm.passphrase"></label>
+        </template>
+      </template>
+
+      <template v-else>
+        <label class="field"><span>面板地址</span><input class="input" v-model.trim="connForm.base_url" placeholder="http://192.168.1.1:3000"></label>
+        <div class="row" style="gap:10px">
+          <label class="field" style="flex:1"><span>用户名</span><input class="input" v-model.trim="connForm.username" placeholder="admin"></label>
+          <label class="field" style="flex:1"><span>密码{{ connForm.id ? '（留空表示不修改）' : '' }}</span><input class="input" type="password" v-model="connForm.secret"></label>
+        </div>
+        <div class="switch" :class="{on: connForm.verify_tls}" @click="connForm.verify_tls = connForm.verify_tls ? 0 : 1"><span class="track"></span>校验 TLS 证书（自签名证书请关闭）</div>
+      </template>
+
+      <div class="row" style="margin-top:14px">
+        <div class="switch" :class="{on: connForm.enabled}" @click="connForm.enabled = connForm.enabled ? 0 : 1"><span class="track"></span>启用该连接</div>
+      </div>
+      <label class="field" style="margin-top:12px"><span>备注</span><input class="input" v-model.trim="connForm.remark"></label>
+      <div class="actions">
+        <button class="btn" @click="connModal=false">取消</button>
+        <button class="btn btn-primary" @click="saveConn">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 测试结果 ============ -->
+  <div class="modal-mask" v-if="testModal" @click.self="testModal=false">
+    <div class="modal">
+      <h3>连接测试</h3>
+      <div class="row" style="margin-bottom:10px"><span class="badge" :class="testResult.ok?'ok':'danger'">{{ testResult.ok ? '连接成功' : '连接失败' }}</span></div>
+      <pre class="raw">{{ testResult.text }}</pre>
+      <div class="actions"><button class="btn" @click="testModal=false">关闭</button></div>
+    </div>
+  </div>
+
+  <!-- ============ 指派未归属 IP ============ -->
+  <div class="modal-mask" v-if="assignModal" @click.self="assignModal=false">
+    <div class="modal">
+      <h3>把该 IP 指派给设备</h3>
+      <div class="hint" style="margin-bottom:14px">
+        客户端 IP <span class="mono">{{ assignIpAddr }}</span><br>
+        <template v-if="assignMode === 'sink'">指派后该 IP 会写入目标设备，并把它此前「未归属」的连接记录一并回填到该设备。</template>
+        <template v-else>指派后该 IP 会写入目标设备，并把它此前"未归属"的日志一并回填到该设备。</template>
+      </div>
+      <div class="field"><span>目标设备（可搜索）</span>
+        <device-picker v-model="assignDeviceId" :devices="devices"
+                       placeholder="搜索：名称 / 主机名 / MAC / IP / 厂商"></device-picker>
+      </div>
+      <div class="actions">
+        <button class="btn" @click="assignModal=false">取消</button>
+        <button class="btn btn-primary" :disabled="!assignDeviceId" @click="doAssign">确认指派</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ AdGuard 客户端：新建 / 变更预览 ============ -->
+  <div class="modal-mask" v-if="aghModal" @click.self="aghModal=false">
+    <div class="modal">
+      <h3>{{ aghPlan ? (aghPlan.exists ? '更新 AdGuard 客户端' : '新建 AdGuard 客户端') : '新建 AdGuard 客户端' }}</h3>
+
+      <template v-if="!aghPlan">
+        <div class="field"><span>客户端名称（AdGuard 里显示的名字）</span>
+          <input class="input" v-model.trim="aghForm.name" placeholder="例如：客厅电视"
+                 @keyup.enter="previewAgh(aghForm.name, aghForm.deviceId)">
+        </div>
+        <div class="field"><span>对应设备（可搜索）</span>
+          <device-picker v-model="aghForm.deviceId" :devices="devices"
+                         placeholder="搜索：名称 / 主机名 / MAC / IP / 厂商"></device-picker>
+        </div>
+        <div class="hint" style="margin-top:6px">将写入该设备的「主 MAC + 当前 IPv4 + 该设备仍在产生的 IPv6」作为这个客户端的<b>识别地址（ids）</b>。AdGuard 就是靠它把流量算到该客户端头上；若已存在同名客户端，则同步它的识别地址（其它设置保持不变）。IPv6 的取舍跟随 AdGuard 的统计保留时长，无需在这里配置。</div>
+        <div class="actions">
+          <button class="btn" @click="aghModal=false">取消</button>
+          <button class="btn btn-primary" :disabled="!aghForm.name || !aghForm.deviceId || aghBusy"
+                  @click="previewAgh(aghForm.name, aghForm.deviceId)">预览变更</button>
+        </div>
+      </template>
+
+      <template v-else>
+        <div class="hint" style="margin-bottom:12px">
+          客户端「<strong>{{ aghPlan.name }}</strong>」 ← 设备「<strong>{{ aghTargetName() }}</strong>」<br>
+          {{ aghPlan.exists ? '该客户端已存在，将把它的识别地址（ids）同步为下面这组；其它设置（上游、过滤开关、标签等）保持不变。' : '该客户端不存在，将按下面这组识别地址（ids）新建。' }}
+        </div>
+
+        <div class="row wrap" style="gap:10px;margin-bottom:10px" v-if="aghPlan.unknown.length">
+          <div class="switch" :class="{on: aghIncludeUnknown}" @click="aghIncludeUnknown = !aghIncludeUnknown; reloadAghPlan()">
+            <span class="track"></span>一并清理未知项
+          </div>
+          <span class="muted" style="font-size:12px">本系统认不出的地址（可能你手工加的），默认保留</span>
+        </div>
+
+        <div v-if="aghPlan.data_stale" class="card" style="background:var(--warn-soft);border-color:transparent;margin-bottom:10px;padding:10px 12px;font-size:12.5px">
+          <b style="color:var(--warn)">台账数据可能已过时</b>
+          <div style="margin-top:4px">
+            台账里该设备最近一次观测是 <b>{{ fmtAge(aghPlan.data_age_sec) }}</b>（采集可能失败过），
+            而 AdGuard 是按实时的 ARP/DHCP 判断的，两边可能不一致。请确认下面的地址无误再写入；
+            批量/自动同步在这种情况下会<strong>自动跳过</strong>这个客户端。
+          </div>
+        </div>
+
+        <div class="kv" style="grid-template-columns:56px 1fr">
+          <div class="k">新增</div>
+          <div><div class="diff"><span class="add" v-for="x in aghPlan.add" :key="x">+ {{ x }}</span><span class="muted" v-if="!aghPlan.add.length">无</span></div></div>
+          <div class="k">移除</div>
+          <div><div class="diff"><span class="del" v-for="x in aghPlan.remove" :key="x.id" :title="x.why">− {{ x.id }}</span><span class="muted" v-if="!aghPlan.remove.length">无</span></div></div>
+          <div class="k">保留</div>
+          <div><div class="diff"><span class="keep" v-for="x in aghPlan.keep" :key="x">{{ x }}</span><span class="muted" v-if="!aghPlan.keep.length">无</span></div></div>
+          <template v-if="aghPlan.unknown.length">
+            <div class="k">未识别</div>
+            <div><div class="diff">
+              <span class="keep" v-for="x in aghPlan.unknown" :key="x.id" :title="x.why">{{ x.id }}<span class="muted" style="font-size:11px">{{ x.removed ? '（本次会清理）' : '（保留）' }}</span></span>
+            </div></div>
+          </template>
+        </div>
+
+        <div class="hint" style="margin-top:10px" v-if="aghPlan.coverage_ok === false">
+          <b style="color:var(--warn)">注意：本系统日志归档时间短于 AdGuard 的统计窗口，本次只新增、不删除 IPv6。</b>
+        </div>
+
+        <div class="hint" style="margin-top:10px" v-if="aghPlan.ipv6_written && aghPlan.ipv6_written.length">
+          写入的 IPv6（窗口 = AdGuard 统计保留时长{{ aghPlan.window_sec ? '，当前 ' + fmtWindow(aghPlan.window_sec) : '' }}）：
+          <span v-for="x in aghPlan.ipv6_written" :key="x.id" class="mono" style="margin-right:10px">{{ x.id }} <span class="muted">窗口内 {{ x.queries }} 次</span></span>
+        </div>
+
+        <div v-if="aghPlan.remove.length" class="hint" style="margin-top:10px">
+          移除原因：<span v-for="x in aghPlan.remove" :key="x.id" class="mono" style="margin-right:8px">{{ x.id }} → {{ x.why }}</span>
+        </div>
+
+        <div v-if="aghPlan.conflicts.length" class="card" style="background:var(--danger-soft);border-color:transparent;margin-top:12px;padding:10px 12px;font-size:12.5px">
+          <b style="color:var(--danger)">存在冲突，无法写入</b>
+          <div v-for="c in aghPlan.conflicts" :key="c.id" style="margin-top:4px">
+            <span class="mono">{{ c.id }}</span> 已被客户端「{{ c.owner }}」占用（AdGuard 的 id 全局唯一，不会覆盖）
+          </div>
+        </div>
+
+        <div class="actions">
+          <button class="btn" @click="aghModal=false">取消</button>
+          <button class="btn btn-primary" :disabled="aghBusy || !agh.write_allowed || aghPlan.conflicts.length" @click="applyAgh()">
+            {{ aghPlan.exists ? '确认更新' : '确认新建' }}
+          </button>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- ============ AdGuard 客户端：批量 / 全量同步预览 ============ -->
+  <div class="modal-mask" v-if="aghBatchModal && aghBatch" @click.self="aghBatchModal=false">
+    <div class="modal" style="max-width:860px">
+      <h3>{{ aghBatchScope.length ? '同步选中的客户端' : '全部同步' }}</h3>
+      <div class="hint" style="margin-bottom:10px">
+        将把下列客户端的 ids 调整为「主 MAC + 当前 IPv4 + 该设备仍在产生的 IPv6」，并移除 AdGuard 已不再统计的项。
+        IPv6 窗口跟随 AdGuard 的统计保留时长{{ aghBatch.window_sec ? '（当前 ' + fmtWindow(aghBatch.window_sec) + '）' : '' }}。
+        <strong>只更新 ids，不会新建或删除客户端</strong>，也不动其它设置。
+        <template v-if="aghBatch.coverage_ok === false">
+          <br><b style="color:var(--warn)">注意：本系统日志只归档到 {{ fmtTime(aghBatch.log_from) }}，短于 AdGuard 的窗口，因此本次只新增、不删除 IPv6。</b>
+        </template>
+      </div>
+
+      <div class="row wrap" style="gap:10px;margin-bottom:10px">
+        <div class="switch" :class="{on: aghIncludeUnknown}" @click="aghIncludeUnknown = !aghIncludeUnknown; reloadAghBatch()">
+          <span class="track"></span>一并清理未知项
+        </div>
+        <span class="muted" style="font-size:12px">本系统认不出的地址，默认保留</span>
+        <span class="spacer"></span>
+        <span class="badge" :class="aghBatch.changed.length ? 'warn' : 'ok'">需变更 {{ aghBatch.changed.length }}</span>
+        <span class="badge">无需变更 {{ aghBatch.unchanged.length }}</span>
+        <span class="badge" v-if="aghBatch.skipped.length">跳过 {{ aghBatch.skipped.length }}</span>
+      </div>
+
+      <div v-if="aghBatch.batch_too_large" class="card" style="background:var(--danger-soft);border-color:transparent;margin-bottom:10px;padding:10px 12px;font-size:12.5px">
+        <b style="color:var(--danger)">一次最多同步 {{ aghBatch.limit }} 个客户端</b>
+        <div style="margin-top:4px">本次需要变更 {{ aghBatch.changed.length }} 个。请先勾选一部分分批同步。</div>
+      </div>
+
+      <div class="table-wrap" style="max-height:380px;overflow:auto">
+        <table class="tbl">
+          <thead><tr><th style="width:170px">客户端</th><th>新增</th><th>移除</th></tr></thead>
+          <tbody>
+            <tr v-for="p in aghBatch.changed" :key="p.name">
+              <td>{{ p.name }}<div class="muted" style="font-size:11.5px">{{ p.device_name || '—' }}</div></td>
+              <td><div class="diff"><span class="add" v-for="x in p.add" :key="x">+ {{ x }}</span><span class="muted" v-if="!p.add.length">无</span></div></td>
+              <td><div class="diff">
+                <span class="del" v-for="x in p.remove" :key="x.id" :title="x.why">− {{ x.id }}</span>
+                <span class="muted" v-if="!p.remove.length">无</span>
+              </div></td>
+            </tr>
+            <tr v-if="!aghBatch.changed.length"><td colspan="3"><div class="empty">这些客户端都已是最新，无需写入</div></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="row wrap" style="gap:6px;margin-top:10px" v-if="aghBatch.skipped.length">
+        <span class="muted" style="font-size:12px">跳过（不会改动）</span>
+        <span class="badge" v-for="s in aghBatch.skipped" :key="s.name" :title="s.reason">{{ s.name }}</span>
+      </div>
+      <div class="row wrap" style="gap:6px;margin-top:6px" v-if="aghBatch.blocked.length">
+        <span class="muted" style="font-size:12px">有冲突（会被跳过）</span>
+        <span class="badge danger" v-for="b in aghBatch.blocked" :key="b.name">{{ b.name }}</span>
+      </div>
+
+      <div class="actions">
+        <button class="btn" @click="aghBatchModal=false">取消</button>
+        <button class="btn btn-primary" :disabled="aghBusy || !agh.write_allowed || !aghBatch.changed.length || aghBatch.batch_too_large" @click="applyAghBatch">确认同步</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toasts">
+    <div v-for="t in toasts" :key="t.id" class="toast" :class="t.type">{{ t.text }}</div>
+  </div>
+</div>
+
+<script src="/vendor/vue.global.prod.js"></script>
+<script>window.Vue || document.write('<scr'+'ipt src="https://unpkg.com/vue@3/dist/vue.global.prod.js"><\/scr'+'ipt>');</script>
+<script src="/vendor/echarts.min.js"></script>
+<script>window.echarts || document.write('<scr'+'ipt src="https://unpkg.com/echarts@5/dist/echarts.min.js"><\/scr'+'ipt>');</script>
+<script src="/app.js"></script>
+</body>
+</html>

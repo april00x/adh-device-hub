@@ -1,0 +1,9 @@
+node_modules/
+data/
+*.log
+
+# 环境变量与本机/编辑器产生的文件
+.env
+.env.*
+Thumbs.db
+.DS_Store

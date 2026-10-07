@@ -1,0 +1,25 @@
+{
+  "name": "adh-device-hub",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AdGuard Home 设备身份中枢：以 MAC 为锚点归并多 IP/历史 IP，中文命名，只读汇总查询日志（不写回路由器与 AdGuard）",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "check-ui": "node tools/check-ui.js",
+    "reset-password": "node src/reset-password.js"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.5.0",
+    "cookie-parser": "^1.4.7",
+    "echarts": "^5.5.1",
+    "express": "^4.21.1",
+    "node-forge": "^1.4.0",
+    "ssh2": "^1.16.0",
+    "vue": "^3.5.12"
+  }
+}
