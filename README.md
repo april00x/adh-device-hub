@@ -1,6 +1,6 @@
 # AdGuard Home 设备身份中枢 · adh-device-hub
 
-> 用 MAC 地址把 AdGuard Home 里散成一堆 IP 的查询日志按「设备」合并，长期可查。
+> 用 MAC 地址把 AdGuard Home 里散成一堆 IP 的查询日志按「设备」合并
 
 [![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A5%2018.17-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Express](https://img.shields.io/badge/Express-4.x-000000?logo=express&logoColor=white)](https://expressjs.com/)
@@ -168,6 +168,8 @@ sudo setcap 'cap_net_bind_service=+ep' $(readlink -f $(which node))
 ---
 
 ## 拦截流量分析
+
+**特别注意：使用该功能可能会导致智能电视投屏失败或视频加载缓慢**
 
 AdGuard 的拦截模式设为「自定义 IP → 本机地址」后，被拦域名会解析到这台机器，客户端往往会真的发连接过来（80 明文、443 TLS）。AdGuard 那边只留一条已拦截的日志，本功能就在本机等着这些连接并记录。
 
